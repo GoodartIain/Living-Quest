@@ -1,4 +1,4 @@
-// Living Quest — server for Milestones 1–3. Node stdlib plus `pg`.
+// Living Quest — server for Milestones 1–4. Node stdlib plus `pg`.
 'use strict';
 const http = require('node:http');
 const fs = require('node:fs');
@@ -6,6 +6,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const tabletop = require('./tabletop.js');
 const { memoryStore, postgresStore } = require('./store.js');
+const characters = require('./characters.js');
 
 const ADVANCEMENT = ['milestone', 'xp'];
 const AUTONOMY = ['static', 'scheduled', 'reactive', 'simulated', 'ai-assisted'];
@@ -246,24 +247,27 @@ function createApp({ store = memoryStore() } = {}) {
         advancement: {
           mode: override ? oneOf(b.advancement, ADVANCEMENT, 'advancement') : world.settings.advancement,
           source: override ? 'campaign' : 'world',
+          levelUp: oneOf(b.levelUp ?? 'confirm', ['auto', 'confirm'], 'levelUp'),
         },
       };
       db.campaigns.push(campaign);
       record(u.id, 'campaign.created', { campaignId: campaign.id, advancement: campaign.advancement });
       return campaign;
     },
+    // { mode?, levelUp?, confirm? }: switching mode needs confirm; levelUp ('auto' | 'confirm') applies to XP campaigns.
     'PATCH /api/campaigns/:id/advancement': (u, b, p) => {
       const campaign = find('campaigns', p.id);
       need(u, campaign.worldId, 'gm');
-      const mode = oneOf(b.mode, ADVANCEMENT, 'mode');
-      if (mode === campaign.advancement.mode) return campaign;
-      if (b.confirm !== true) {
-        fail(409, `Switching ${campaign.advancement.mode} → ${mode} keeps every character's current level and history; ` +
-          'future awards use the new mode. Resend with confirm: true.');
+      const cur = campaign.advancement;
+      const mode = b.mode === undefined ? cur.mode : oneOf(b.mode, ADVANCEMENT, 'mode');
+      const levelUp = b.levelUp === undefined ? cur.levelUp || 'confirm' : oneOf(b.levelUp, ['auto', 'confirm'], 'levelUp');
+      if (mode !== cur.mode && b.confirm !== true) {
+        fail(409, `Switching ${cur.mode} → ${mode} keeps every character's current level and history; ` +
+          'future awards use the new mode and no level is added or removed now. Resend with confirm: true.');
       }
-      const from = campaign.advancement.mode;
-      campaign.advancement = { mode, source: 'campaign' };
-      record(u.id, 'campaign.advancement.changed', { campaignId: campaign.id, from, to: mode });
+      if (mode === cur.mode && levelUp === (cur.levelUp || 'confirm')) return campaign;
+      campaign.advancement = { mode, levelUp, source: mode === cur.mode ? cur.source : 'campaign' };
+      record(u.id, 'campaign.advancement.changed', { campaignId: campaign.id, from: cur, to: campaign.advancement });
       return campaign;
     },
     'POST /api/campaigns/:id/invites': (u, b, p) => {
@@ -342,9 +346,12 @@ function createApp({ store = memoryStore() } = {}) {
     },
   };
 
-  const table2d = tabletop({ db, find, fail, need, viewer, record, id, SEES, VISIBILITY,
-    check: { str, oneOf, bool, num, safeUrl } });
-  Object.assign(routes, table2d.routes);
+  const check = { str, oneOf, bool, num, safeUrl };
+  const hooks = {};
+  const table2d = tabletop({ db, find, fail, need, viewer, record, id, SEES, VISIBILITY, check, hooks });
+  const chars = characters({ db, find, fail, need, record, id, check, publishScene: table2d.publish, canSeeScene: table2d.canSee });
+  Object.assign(hooks, { tokenInfo: chars.tokenInfo, sceneRolls: chars.sceneRolls });
+  Object.assign(routes, table2d.routes, chars.routes);
 
   // GM edits for locations and maps: field whitelist. Ids never change, so renames never break links.
   const EDITABLE = {

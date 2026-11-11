@@ -33,6 +33,15 @@ test('everything survives a restart exactly', { skip }, async () => {
   await a.ok('PUT', `/api/scenes/${scene.id}/encounter`, { combatants: [{ tokenId: hero.id, initiative: 12 }, { tokenId: gob.id, initiative: 3 }] }, gm);
   await a.ok('POST', `/api/scenes/${scene.id}/encounter/next`, null, gm);
   await a.ok('DELETE', `/api/tokens/${gob.id}`, null, gm);
+  const ch = (await a.ok('POST', `/api/campaigns/${c.id}/characters`, { name: 'Brann', species: 'Human', className: 'Rogue', background: 'Criminal',
+    abilityMethod: 'standard', baseScores: { str: 8, dex: 15, con: 14, int: 13, wis: 12, cha: 10 }, backgroundBonus: { dex: 2, int: 1 },
+    classSkills: ['Acrobatics', 'Deception', 'Insight', 'Perception'], speciesSkills: ['Survival'] }, pl)).character;
+  await a.ok('PATCH', `/api/characters/${ch.id}`, { inventory: [{ name: 'Dagger', qty: 2 }], conditions: ['Prone'], currency: { sp: 7 } }, pl);
+  await a.ok('POST', `/api/campaigns/${c.id}/xp`, { amount: 450, reason: 'Heist', category: 'quest' }, gm);
+  await a.ok('POST', `/api/characters/${ch.id}/level-up`, null, gm);
+  await a.ok('POST', `/api/characters/${ch.id}/hp`, { damage: 3 }, pl);
+  await a.ok('POST', `/api/scenes/${scene.id}/tokens`, { name: 'x', x: 3, y: 3, characterId: ch.id }, gm);
+  await a.ok('POST', `/api/worlds/${w.id}/rolls`, { characterId: ch.id, check: 'skill:Stealth', mode: 'advantage', sceneId: scene.id }, pl);
   const before = JSON.stringify(a.app.db);
   await a.close();
 
@@ -41,6 +50,8 @@ test('everything survives a restart exactly', { skip }, async () => {
     assert.deepEqual(b.app.db, JSON.parse(before)); // deep: jsonb does not keep key order
     assert.equal((await b.ok('GET', `/api/pages/${npc.id}`, null, pl)).page.body, `Lives in [[${town.pageId}|Greyhaven]].`);
     assert.equal((await b.ok('GET', `/api/scenes/${scene.id}`, null, pl)).tokens[0].x, 5);
+    const sheet = await b.ok('GET', `/api/characters/${ch.id}`, null, pl);
+    assert.deepEqual([sheet.level, sheet.xp, sheet.history.length], [2, 450, 2]);
   } finally { await b.close(); }
 });
 

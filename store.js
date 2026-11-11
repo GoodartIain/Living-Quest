@@ -20,12 +20,17 @@ const SPEC = {
   discoveries: ['id', 'worldId', 'locationId', 'campaignId'],
   revisions: ['id', 'pageId', 'worldId', 'at', 'actor', 'title', 'body', 'gmNotes', 'kind', 'visibility'],
   scenes: ['id', 'worldId', 'locationId', 'name', 'grid', 'cols', 'rows', 'backgroundUrl', 'visibility', 'fog', 'encounter'],
-  tokens: ['id', 'worldId', 'sceneId', 'name', 'x', 'y', 'size', 'color', 'visibility', 'controlledBy', 'pageId'],
+  tokens: ['id', 'worldId', 'sceneId', 'name', 'x', 'y', 'size', 'color', 'visibility', 'controlledBy', 'pageId', 'characterId'],
+  characters: ['id', 'worldId', 'campaignId', 'ownerId', 'ruleset', 'name', 'portraitUrl', 'personality', 'backstory', 'species', 'className',
+    'background', 'abilityMethod', 'baseScores', 'backgroundBonus', 'abilities', 'skills', 'feats', 'tools', 'hp', 'conditions', 'inventory', 'currency'],
+  advancements: ['id', 'worldId', 'campaignId', 'characterId', 'kind', 'amount', 'category', 'reason', 'by', 'auto', 'at'],
+  rolls: ['id', 'worldId', 'sceneId', 'userId', 'userName', 'characterId', 'label', 'visibility', 'formula', 'mode', 'total', 'parts', 'at'],
   events: ['seq', 'at', 'actor', 'type', 'data'],
 };
 const COLLECTIONS = Object.keys(SPEC);
-const JSON_FIELDS = new Set(['settings', 'advancement', 'fog', 'encounter', 'controlledBy', 'data']);
-const APPEND_ONLY = new Set(['events', 'revisions']);
+const JSON_FIELDS = new Set(['settings', 'advancement', 'fog', 'encounter', 'controlledBy', 'data', 'baseScores', 'backgroundBonus',
+  'abilities', 'skills', 'feats', 'tools', 'hp', 'conditions', 'inventory', 'currency', 'parts']);
+const APPEND_ONLY = new Set(['events', 'revisions', 'advancements', 'rolls']);
 const keyOf = (c) => (c === 'events' ? 'seq' : 'id');
 const snake = (f) => f.replace(/[A-Z]/g, (m) => '_' + m.toLowerCase());
 const empty = () => Object.fromEntries(COLLECTIONS.map((c) => [c, []]));
@@ -35,6 +40,8 @@ function upgrade(db) {
   for (const l of db.locations) l.requiresDiscovery ??= false;
   for (const p of db.pages) { p.kind ??= p.locationId ? 'location' : 'lore'; p.visibility ??= 'party'; p.locationId ??= null; }
   for (const i of db.invites) i.acceptedBy ??= null;
+  for (const t of db.tokens) t.characterId ??= null;
+  for (const c of db.campaigns) c.advancement.levelUp ??= 'confirm';
   return db;
 }
 

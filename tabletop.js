@@ -2,7 +2,8 @@
 // Every push is projected per recipient, so hidden tokens never reach a player's browser.
 'use strict';
 
-module.exports = function tabletop({ db, find, fail, need, viewer, record, id, SEES, VISIBILITY, check }) {
+// `hooks` is filled in by the characters module (tokenInfo, sceneRolls), which is created after this one.
+module.exports = function tabletop({ db, find, fail, need, viewer, record, id, SEES, VISIBILITY, check, hooks }) {
   const { str, oneOf, bool, num } = check;
   const subscribers = new Set(); // { res, user, sceneId }
   const cell = (t) => `${Math.floor(t.x)},${Math.floor(t.y)}`; // shortcut: a large token counts as its top-left cell for fog; use its footprint when tokens >1 cell matter
@@ -17,6 +18,10 @@ module.exports = function tabletop({ db, find, fail, need, viewer, record, id, S
     const tokens = db.tokens.filter((t) => t.sceneId === scene.id && sees(t)).map((t) => {
       const out = { ...t, mine: gm || t.controlledBy.includes(user.id) };
       if (t.pageId && !v.seesPage(find('pages', t.pageId))) out.pageId = null;
+      if (t.characterId) {
+        out.character = hooks.tokenInfo(t.characterId, out.mine);
+        if (out.character) out.name = out.character.name; // the character sheet is the single source of the name
+      }
       if (!gm) delete out.controlledBy;
       return out;
     });
@@ -32,6 +37,7 @@ module.exports = function tabletop({ db, find, fail, need, viewer, record, id, S
         turnTokenId: current && ids.has(current.tokenId) ? current.tokenId : null,
         combatants: enc.combatants.filter((c) => ids.has(c.tokenId)),
       },
+      rolls: hooks.sceneRolls(user, v.role, scene.id),
     };
   }
 
@@ -120,10 +126,15 @@ module.exports = function tabletop({ db, find, fail, need, viewer, record, id, S
       const size = num(b.size ?? 1, 'size', 1, 6, true);
       const [x, y] = inBounds(s, b.x, b.y, size);
       if (b.pageId != null && find('pages', b.pageId).worldId !== s.worldId) fail(400, 'page belongs to another world');
+      const ch = b.characterId != null ? find('characters', b.characterId) : null;
+      if (ch && ch.worldId !== s.worldId) fail(400, 'character belongs to another world');
+      // A character's token is moved by its owner unless the GM says otherwise.
+      const ownerPlays = ch && db.memberships.some((m) => m.userId === ch.ownerId && m.worldId === s.worldId && m.role === 'player');
+      if (b.controlledBy === undefined && ownerPlays) b.controlledBy = [ch.ownerId];
       const t = { id: id(), worldId: s.worldId, sceneId: s.id, name: str(b.name, 'name', 60), x, y, size,
         color: /^#[0-9a-f]{6}$/i.test(b.color ?? '') ? b.color : '#7a4b1f',
         visibility: oneOf(b.visibility ?? 'party', VISIBILITY, 'visibility'),
-        controlledBy: controllers(s.worldId, b.controlledBy ?? []), pageId: b.pageId ?? null };
+        controlledBy: controllers(s.worldId, b.controlledBy ?? []), pageId: b.pageId ?? null, characterId: ch ? ch.id : null };
       db.tokens.push(t);
       changed(s, u.id, 'token.created', { tokenId: t.id, sceneId: s.id });
       return t;
@@ -201,5 +212,6 @@ module.exports = function tabletop({ db, find, fail, need, viewer, record, id, S
   const scenesAt = (role, locId) => db.scenes.filter((s) => s.locationId === locId && SEES[role].includes(s.visibility))
     .map((s) => ({ id: s.id, name: s.name, visibility: s.visibility }));
 
-  return { routes, stream, scenesAt, subscribers };
+  const canSee = (user, scene) => { try { sceneView(user, scene); return true; } catch { return false; } };
+  return { routes, stream, scenesAt, subscribers, publish, canSee };
 };

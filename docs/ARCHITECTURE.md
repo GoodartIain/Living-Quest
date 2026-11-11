@@ -1,6 +1,6 @@
 # Living Quest — Architecture
 
-Status: design for the whole platform; **implemented: Milestones 1–3 (§3 identity, world, wiki, location/map, scene/token tables; §5 navigation; the 2D subset of §4; scene sync from §10)** (see `MILESTONES.md`). Everything else here is a design, not code.
+Status: design for the whole platform; **implemented: Milestones 1–4 (§3 identity, world, wiki, location/map, scene/token, character/advancement/roll tables; §5 navigation; the 2D subset of §4; §6 characters; scene sync from §10)** (see `MILESTONES.md`). Everything else here is a design, not code.
 
 ## 1. Architecture diagram
 
@@ -138,11 +138,15 @@ interface Zone { id; polygon: Vec3[]; trigger: Interaction[] }
 - Visibility tiers: `gm` < `party` (players) < `public` (players + spectators).
 - Next: knowledge-dependent marker text, links from a pin to scene / NPC / quest / custom action, travel rules that advance the clock.
 
-## 6. Characters and advancement
+## 6. Characters and advancement (implemented)
 
-- World setting `advancement: milestone | xp` (implemented). Campaign stores `{ mode, source }` (implemented). Switching a campaign's mode requires `confirm: true`, keeps levels and history, and is logged (implemented).
-- Character advancement is a ledger, not a field: `advancement_entries(character, kind: 'xp'|'level', amount, reason, source_event, approved_by)`. Level = f(ledger, thresholds) for XP; = count of approved level entries for milestone. Thresholds live in the ruleset adapter, overridable per campaign.
-- Level-up is either `auto` or `requires_confirmation` (campaign setting). Quest completion awards a milestone only if the GM attached one to it.
+- World setting `advancement: milestone | xp`; each campaign stores `{ mode, source, levelUp: 'auto' | 'confirm' }`. Switching mode needs `confirm: true`, adds or removes no levels, and is logged.
+- Ruleset adapter (`rulesets/srd-5.2.1.js`): pure data and functions — `options` for the creation wizard, `create(input)` validates a build (standard array or 27-point buy, background +2/+1 or +1/+1/+1, skill picks without duplicates), `derive(character, level)` computes modifiers, saves, skills, passive Perception, initiative, unarmored AC, speed and max HP (full hit die at level 1, then the fixed average). A second ruleset is a new file with the same exports; nothing else knows SRD numbers.
+- Advancement is a ledger, never a field: `advancements(character, kind 'xp'|'level', amount, category, reason, by, auto, at)`, append-only. Level = 1 + level entries; XP = sum of XP entries. In XP campaigns `pendingLevels = xpLevel(XP) − level`; with `levelUp: auto` levels are added immediately, otherwise the GM approves each one. In milestone campaigns only the GM's milestone award adds a level. The ledger is the level history shown on the sheet.
+- A level-up raises current HP by the same amount as the maximum.
+- Permissions: owner and GM see and edit the full sheet (HP, conditions, inventory, currency, story); other members of the campaign see a summary; XP, milestones and level approval are GM-only.
+- Tokens may link to a character: the token shows the character's name and conditions to everyone who sees the token, and HP only to the GM and the token's controllers. Any character change re-pushes every scene with a linked token.
+- Dice (`dice.js`): formulas like `2d6+1d4-1` rolled on the server with `crypto.randomInt`; advantage/disadvantage on a lone d20; checks (`skill:Stealth`, `save:dex`, `ability:str`, `initiative`) take their bonus from the sheet, so players cannot inflate them. Visibility: `public` (everyone in the world), `private` (roller and GM), `gm` (GM only). Rolls are stored append-only and pushed to their scene.
 
 ## 7. Downtime and world clock
 

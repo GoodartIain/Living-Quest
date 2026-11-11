@@ -1,6 +1,6 @@
 # Living Quest
 
-Browser tabletop / worldbuilding platform. This repository holds Milestones 1–3: worlds, campaigns, advancement settings, invites, nested maps, a linked wiki (NPCs, factions, lore) with relationships, backlinks, search, history and per-campaign discovery, and a live 2D tabletop (tokens, fog of war, measuring, encounters), all with server-enforced visibility.
+Browser tabletop / worldbuilding platform. This repository holds Milestones 1–4: worlds, campaigns, advancement settings, invites, nested maps, a linked wiki (NPCs, factions, lore) with relationships, backlinks, search, history and per-campaign discovery, a live 2D tabletop (tokens, fog of war, measuring, encounters), and characters (guided creation, sheets, server-side dice, XP or milestone levelling linked to tokens), all with server-enforced visibility.
 
 ```sh
 docker compose up                      # app + PostgreSQL 16, http://localhost:3000
@@ -19,3 +19,7 @@ TEST_DATABASE_URL=postgres://user:pass@localhost/lq_test npm test  # also the Po
 Upgrading from a version that saved to `data.json`: start with `DATABASE_URL` pointing at an empty database and the file is imported once (`DATA_FILE` sets its path).
 
 One dependency: `pg`. Design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Status: [docs/MILESTONES.md](docs/MILESTONES.md).
+
+## Licence notice for game rules
+
+This work includes material from the System Reference Document 5.2.1 ("SRD 5.2.1") by Wizards of the Coast LLC, available at https://www.dndbeyond.com/srd. The SRD 5.2.1 is licensed under the Creative Commons Attribution 4.0 International License, available at https://creativecommons.org/licenses/by/4.0/legalcode. The rules data is in `rulesets/srd-5.2.1.js`.
