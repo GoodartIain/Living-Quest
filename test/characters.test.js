@@ -250,3 +250,61 @@ test('attacks and spells: bonuses from the sheet, slots, pact magic, rests', asy
   assert.equal((await cast(wiz, { spellId: hands.id, sceneId: 'missing' })).status, 404);
   assert.deepEqual((await ok('GET', `/api/characters/${wiz.id}`, null, ana)).character.slotsUsed, {});
 });
+
+test('armour, AC, weapon masteries and class attack features', async (t) => {
+  const base = rules.create(fighter); // STR 17, DEX 14, CON 14
+  const ac = (patch, level = 1) => rules.derive({ ...base, weapons: [], ...patch }, level);
+  assert.equal(ac({}).armorClass, 12);
+  assert.equal(ac({ armor: 'Chain Mail' }).armorClass, 16);
+  assert.equal(ac({ armor: 'Chain Mail', shield: true }).armorClass, 18);
+  assert.equal(ac({ armor: 'Chain Mail', shield: true, feats: ['Defense'] }).armorClass, 19, 'Defense: +1 in armour');
+  assert.equal(ac({ armor: 'Breastplate' }).armorClass, 16, 'medium armour caps DEX at +2');
+  assert.equal(ac({ armor: 'Studded Leather Armor' }).armorClass, 14);
+  assert.deepEqual(ac({ armor: 'Plate Armor', abilities: { ...base.abilities, str: 13 } }).armor.speedPenalty, 10);
+  assert.equal(ac({ armor: 'Plate Armor', abilities: { ...base.abilities, str: 13 } }).speed, 20);
+  assert.equal(ac({ className: 'Barbarian' }).armorClass, 14, 'Unarmored Defense: 10 + DEX + CON');
+  assert.equal(ac({ className: 'Barbarian', shield: true }).armorClass, 16);
+  assert.equal(ac({ className: 'Monk', abilities: { ...base.abilities, wis: 16 } }).armorClass, 15, '10 + DEX + WIS');
+  assert.equal(ac({ className: 'Monk', shield: true, abilities: { ...base.abilities, wis: 16 } }).armorClass, 14, 'a shield ends Unarmored Defense for Monks');
+  assert.match(ac({ className: 'Wizard', armor: 'Plate Armor' }).armor.notes[0], /Not trained with heavy armour/);
+  assert.match(ac({ armor: 'Plate Armor' }).armor.notes.join(' '), /Stealth/);
+
+  const atk = (patch, level = 1) => Object.fromEntries(ac(patch, level).attacks.map((a) => [a.name, a]));
+  const monk = atk({ className: 'Monk', abilities: { ...base.abilities, dex: 18 }, weapons: [{ id: 'a', weapon: 'Shortsword' }, { id: 'b', weapon: 'Longsword' }, { id: 'c', weapon: 'Spear' }] }, 5);
+  assert.deepEqual([monk['Unarmed Strike'].damage, monk['Unarmed Strike'].ability], ['1d8+4', 'dex'], 'Martial Arts d8 at level 5');
+  assert.deepEqual([monk.Shortsword.damage, monk.Shortsword.ability], ['1d8+4', 'dex']);
+  assert.equal(monk.Spear.damage, '1d8+4', 'simple melee weapons are Monk weapons');
+  assert.deepEqual([monk.Longsword.damage, monk.Longsword.ability, monk.Longsword.proficient], ['1d8+3', 'str', false]);
+  assert.equal(ac({ className: 'Monk' }, 5).speed, 40, 'Unarmored Movement');
+  assert.equal(ac({ className: 'Rogue' }, 5).sneakAttack, '3d6');
+  const barb = atk({ className: 'Barbarian', raging: true, weapons: [{ id: 'a', weapon: 'Greataxe' }, { id: 'b', weapon: 'Longbow' }] });
+  assert.equal(barb.Greataxe.damage, '1d12+5', 'STR +3 and Rage +2');
+  assert.equal(barb.Longbow.damage, '1d8+2', 'no rage bonus on DEX ranged attacks');
+  const archer = atk({ feats: ['Archery'], weapons: [{ id: 'a', weapon: 'Longbow' }, { id: 'b', weapon: 'Longsword', bonus: 1 }] });
+  assert.equal(archer.Longbow.toHit, 6, 'DEX +2, proficiency +2, Archery +2');
+  assert.deepEqual([archer['Longsword +1'].toHit, archer['Longsword +1'].damage], [6, '1d8+4']);
+  const mastered = atk({ masteries: ['Longsword'], weapons: [{ id: 'a', weapon: 'Longsword' }] });
+  assert.equal(mastered.Longsword.mastery.name, 'Sap');
+  assert.match(mastered.Longsword.mastery.description, /Disadvantage/);
+
+  const { call, ok, close } = await boot();
+  t.after(close);
+  const gm = (await ok('POST', '/api/users', { name: 'Gm' })).token;
+  const world = await ok('POST', '/api/worlds', { name: 'W', advancement: 'xp' }, gm);
+  const camp = await ok('POST', `/api/worlds/${world.id}/campaigns`, { name: 'C' }, gm);
+  const make = (b) => call('POST', `/api/campaigns/${camp.id}/characters`, b, gm);
+  assert.equal((await make({ ...fighter, name: 'Short', species: 'Human', speciesSkills: ['Stealth'], size: 'Small' })).body.character.size, 'Small');
+  assert.equal((await make({ ...fighter, name: 'X', size: 'Small' })).status, 400, 'Dwarves are Medium');
+  const c = (await make({ ...fighter, name: 'Brann' })).body.character;
+  const patch = (b) => call('PATCH', `/api/characters/${c.id}`, b, gm);
+  assert.equal((await patch({ armor: 'Shield' })).status, 400);
+  assert.equal((await patch({ armor: 'Chain Mail', shield: true })).body.sheet.armorClass, 18);
+  assert.equal((await patch({ masteries: ['Longsword', 'Greatsword', 'Longbow', 'Dagger'] })).status, 400, 'Fighter 1 masters 3');
+  assert.deepEqual((await patch({ masteries: ['Longsword', 'Greatsword', 'Longbow'] })).body.sheet.masteries, { allowed: 3, chosen: ['Longsword', 'Greatsword', 'Longbow'] });
+  assert.equal((await patch({ raging: true })).status, 400, 'only Barbarians rage');
+  assert.equal((await patch({ weapons: [{ weapon: 'Longsword', bonus: 4 }] })).status, 400);
+  assert.equal((await patch({ weapons: [{ custom: { name: 'Bone Club', damage: '1d6', type: 'bludgeoning', category: 'simple melee', properties: ['Laser'] } }] })).status, 400);
+  const custom = await patch({ weapons: [{ custom: { name: 'Bone Club', damage: '1d6', type: 'bludgeoning', category: 'simple melee', properties: ['Light', 'Thrown (20/60)'] }, bonus: 1 }] });
+  const club = custom.body.sheet.attacks.find((a) => a.name === 'Bone Club');
+  assert.deepEqual([club.toHit, club.damage], [6, '1d6+4']);
+});

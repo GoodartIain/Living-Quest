@@ -9,7 +9,7 @@ const XP_CATEGORIES = ['combat', 'quest', 'exploration', 'roleplay', 'downtime',
 const COINS = ['cp', 'sp', 'ep', 'gp', 'pp'];
 
 module.exports = function characters({ db, find, fail, need, record, id, check, publishScene, canSeeScene }) {
-  const { str, oneOf, num, safeUrl } = check;
+  const { str, oneOf, num, safeUrl, bool } = check;
   const optional = (v, name, max) => (v === undefined ? '' : typeof v === 'string' && v.length <= max ? v : fail(400, `${name} must be text up to ${max} chars`));
 
   const ledger = (c) => db.advancements.filter((a) => a.characterId === c.id);
@@ -81,6 +81,7 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
     if (kind === 'save' && rules.ABILITIES.includes(what)) return d20(s.saves[what], `${what.toUpperCase()} save`);
     if (kind === 'ability' && rules.ABILITIES.includes(what)) return d20(s.modifiers[what], `${what.toUpperCase()} check`);
     if (kind === 'initiative') return d20(s.initiative, 'Initiative');
+    if (kind === 'sneak') return { formula: crit ? doubleDice(s.sneakAttack || fail(409, 'only Rogues have Sneak Attack')) : s.sneakAttack || fail(409, 'only Rogues have Sneak Attack'), label: `${c.name}: Sneak Attack${crit ? ' (critical)' : ''}` };
     if (kind === 'spellattack') return d20((s.spellcasting || fail(409, `${c.className}s do not cast spells`)).attackBonus, 'spell attack');
     const atk = (kind === 'attack' || kind === 'damage') && (s.attacks.find((a) => a.id === what) || fail(404, 'no such attack on this character'));
     if (kind === 'attack') return d20(atk.toHit, `${atk.name} attack${atk.proficient ? '' : ' (not proficient)'}`);
@@ -89,7 +90,7 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
       const f = versatile ? atk.versatileDamage : atk.damage;
       return { formula: crit ? doubleDice(f) : f, label: `${c.name}: ${atk.name} damage (${atk.type}${versatile ? ', two-handed' : ''}${crit ? ', critical' : ''})` };
     }
-    fail(400, 'check must be skill:<Skill>, save:<ability>, ability:<ability>, initiative, spellattack, attack:<id> or damage:<id>');
+    fail(400, 'check must be skill:<Skill>, save:<ability>, ability:<ability>, initiative, spellattack, sneak, attack:<id> or damage:<id>');
   }
   // A critical hit rolls the damage dice twice; modifiers are added once.
   const doubleDice = (f) => f.replace(/(\d*)d(\d+)/g, (_, n, m) => `${2 * (Number(n) || 1)}d${m}`);
@@ -106,10 +107,22 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
     return r;
   }
 
+  const PROPERTY = /^(Finesse|Light|Heavy|Reach|Two-Handed|Loading|Versatile \(\d*d\d+\)|Thrown \(\d+\/\d+\)|Ammunition \(\d+\/\d+\))$/;
+  // SRD weapons by name, or a custom weapon the GM or player defines; either may be magic (+1 to +3).
   function validWeapons(list) {
     if (!Array.isArray(list) || list.length > 20) fail(400, 'weapons must be a list of up to 20');
-    return list.map((w) => ({ id: typeof w.id === 'string' && w.id.length <= 40 && w.id !== 'unarmed' ? w.id : id(),
-      weapon: rules.WEAPONS[w.weapon] ? w.weapon : fail(400, `unknown weapon ${w.weapon}; choose from the SRD weapon list`) }));
+    return list.map((w) => {
+      const base = { id: typeof w.id === 'string' && w.id.length <= 40 && w.id !== 'unarmed' ? w.id : id(), bonus: num(w.bonus ?? 0, 'magic bonus', 0, 3, true) };
+      if (w.custom) {
+        const k = w.custom;
+        const damage = str(k.damage, 'custom damage', 20);
+        if (!/^(\d*d\d+|\d+)$/.test(damage)) fail(400, 'custom damage must look like 1d8 or 2d6');
+        if (!Array.isArray(k.properties) || k.properties.some((x) => !PROPERTY.test(x))) fail(400, 'custom properties must be from: Finesse, Light, Heavy, Reach, Two-Handed, Loading, Versatile (1d10), Thrown (20/60), Ammunition (80/320)');
+        return { ...base, custom: { name: str(k.name, 'custom weapon name', 60), damage, type: oneOf(k.type, ['bludgeoning', 'piercing', 'slashing', 'acid', 'cold', 'fire', 'force', 'lightning', 'necrotic', 'poison', 'psychic', 'radiant', 'thunder'], 'damage type'),
+          category: oneOf(k.category, ['simple melee', 'simple ranged', 'martial melee', 'martial ranged'], 'category'), properties: k.properties } };
+      }
+      return { ...base, weapon: rules.WEAPONS[w.weapon] ? w.weapon : fail(400, `unknown weapon ${w.weapon}; choose from the SRD weapon list or define a custom weapon`) };
+    });
   }
   function validSpells(list) {
     if (!Array.isArray(list) || list.length > 300) fail(400, 'spells must be a list of up to 300');
@@ -146,7 +159,8 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
         name: str(b.name, 'name', 80), portraitUrl: b.portraitUrl ? safeUrl(b.portraitUrl) : '',
         personality: optional(b.personality, 'personality', 4000), backstory: optional(b.backstory, 'backstory', 20000),
         ...built, hp: { current: 0, temp: 0 }, conditions: [], inventory: [], currency: { cp: 0, sp: 0, ep: 0, gp: 0, pp: 0 },
-        weapons: [], spells: [], slotsUsed: {} };
+        weapons: [], spells: [], slotsUsed: {}, armor: null, shield: false, masteries: [], raging: false,
+        deathSaves: { successes: 0, failures: 0 }, hitDiceUsed: 0, journal: [] };
       c.hp.current = rules.derive(c, 1).maxHp;
       db.characters.push(c);
       record(u.id, 'character.created', { characterId: c.id, campaignId: camp.id, ownerId });
@@ -181,6 +195,18 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
           name: str(it.name, 'item name', 80), qty: num(it.qty ?? 1, 'quantity', 0, 9999, true), notes: optional(it.notes, 'item notes', 500) }));
       }
       if (b.weapons !== undefined) ch.weapons = validWeapons(b.weapons);
+      if (b.armor !== undefined) ch.armor = b.armor === null ? null : b.armor !== 'Shield' && rules.DATA.armor[b.armor] ? b.armor : fail(400, `armor must be null or one of: ${Object.keys(rules.DATA.armor).filter((x) => x !== 'Shield').join(', ')}`);
+      if (b.shield !== undefined) ch.shield = bool(b.shield, 'shield');
+      if (b.raging !== undefined) {
+        if (c.className !== 'Barbarian') fail(400, 'only Barbarians rage');
+        ch.raging = bool(b.raging, 'raging');
+      }
+      if (b.masteries !== undefined) {
+        const allowed = rules.masteryCount(c, levelOf(c));
+        if (!Array.isArray(b.masteries) || b.masteries.length > allowed) fail(400, `${c.className} level ${levelOf(c)} may master ${allowed} weapon kind(s)`);
+        for (const m of b.masteries) if (!rules.weaponProficient(c, m)) fail(400, `${m}: choose SRD weapons ${c.name} is proficient with`);
+        ch.masteries = [...new Set(b.masteries)];
+      }
       if (b.spells !== undefined) ch.spells = validSpells(b.spells);
       if (b.currency !== undefined) ch.currency = Object.fromEntries(COINS.map((k) => [k, num(b.currency[k] ?? 0, k, 0, 1e9, true)]));
       if (!Object.keys(ch).length) fail(400, 'nothing to change');

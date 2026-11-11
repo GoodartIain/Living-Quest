@@ -116,6 +116,7 @@ function renderWizard() {
       field('Name', h('input', { value: d.name, oninput: set('name'), required: true })),
       field('Portrait image URL (optional)', h('input', { type: 'url', value: d.portraitUrl, oninput: set('portraitUrl') }))],
     () => [field('Species', h('select', { onchange: (e) => { d.species = e.target.value; d.speciesSkills = []; redraw(); } }, options(Object.keys(RULES.species), d.species))),
+      sp.size === 'Medium or Small' && field('Size', h('select', { onchange: set('size') }, options(['Medium', 'Small'], d.size || 'Medium'))),
       h('p', { class: 'muted' }, `${sp.size} · speed ${sp.speed} ft · ${sp.traits.join(', ')}`),
       sp.skills && [h('p', {}, `Choose ${sp.skills.count} skill proficiency:`), choose(sp.skills.from.filter((s) => !taken().has(s) && !d.classSkills.includes(s)), d.speciesSkills, sp.skills.count, 'speciesSkills')]],
     () => [field('Class', h('select', { onchange: (e) => { d.className = e.target.value; d.classSkills = []; redraw(); } }, options(Object.keys(RULES.classes), d.className))),
@@ -171,7 +172,7 @@ function renderWizard() {
           for (let s = 0; s < STEPS.length - 1; s++) { const p = stepProblem(s, d); if (p) { wz.step = s; render(); throw new Error(p); } }
           const r = await api('POST', `/api/campaigns/${d.campaignId}/characters`, { name: d.name, portraitUrl: d.portraitUrl || undefined,
             species: d.species, className: d.className, background: d.background, abilityMethod: d.abilityMethod, baseScores: d.baseScores,
-            backgroundBonus: bonusOf(d), classSkills: d.classSkills, speciesSkills: d.speciesSkills, personality: d.personality, backstory: d.backstory });
+            backgroundBonus: bonusOf(d), classSkills: d.classSkills, speciesSkills: d.speciesSkills, size: RULES.species[d.species].size === 'Medium or Small' ? d.size || 'Medium' : undefined, personality: d.personality, backstory: d.backstory });
           state.wizard = null;
           await loadCharacters();
           await openCharacter(r.character.id);
@@ -209,7 +210,7 @@ function showRolls(rolls) {
 }
 async function rollCheck(c, chk, extra = {}) {
   const o = rollOpts();
-  const damage = chk.startsWith('damage:');
+  const damage = chk.startsWith('damage:') || chk === 'sneak';
   showRolls([await api('POST', `/api/worlds/${state.world.id}/rolls`, { characterId: c.id, check: chk, mode: damage ? 'normal' : o.mode, visibility: o.visibility, crit: damage && !!o.crit, ...extra })]);
 }
 
@@ -224,11 +225,51 @@ function attacksSection(c, s) {
         h('td', { align: 'center' }, roll(`attack:${a.id}`, signed(a.toHit))),
         h('td', { align: 'center' }, roll(`damage:${a.id}`, `${a.damage} ${a.type}`),
           a.versatileDamage && [' · ', roll(`damage:${a.id}`, `${a.versatileDamage} two-handed`, { versatile: true })]),
-        h('td', { class: 'muted' }, a.properties.join(', ')),
+        h('td', { class: 'muted' }, a.properties.join(', '), a.mastery && [a.properties.length ? ' · ' : '', h('abbr', { title: a.mastery.description }, `Mastery: ${a.mastery.name}`)]),
         h('td', {}, a.id !== 'unarmed' && h('button', { class: 'link', onclick: () => save(c.weapons.filter((w) => w.id !== a.id)) }, 'remove'))))),
-    h('form', { onsubmit: onSubmit((f) => save([...c.weapons, { weapon: f.weapon }])) },
+    h('form', { onsubmit: onSubmit((f) => save([...c.weapons, { weapon: f.weapon, bonus: +f.bonus }])) },
       field('Add a weapon', h('select', { name: 'weapon' }, Object.entries(RULES.weapons).map(([n, w]) => h('option', { value: n }, `${n} (${w.category}, ${w.damage} ${w.type})`)))),
-      h('button', {}, 'Add')));
+      field('Magic', h('select', { name: 'bonus' }, [0, 1, 2, 3].map((n) => h('option', { value: n }, n ? `+${n}` : 'none')))),
+      h('button', {}, 'Add')),
+    h('details', {}, h('summary', {}, 'Add a custom weapon'),
+      h('form', { onsubmit: onSubmit((f) => save([...c.weapons, { bonus: +f.bonus, custom: { name: f.name, damage: f.damage, type: f.type, category: f.category,
+          properties: f.properties.split(',').map((x) => x.trim()).filter(Boolean) } }])) },
+        field('Name', h('input', { name: 'name', required: true })),
+        field('Damage', h('input', { name: 'damage', required: true, placeholder: '1d8', size: 5 })),
+        field('Type', h('select', { name: 'type' }, options(['slashing', 'piercing', 'bludgeoning', 'acid', 'cold', 'fire', 'force', 'lightning', 'necrotic', 'poison', 'psychic', 'radiant', 'thunder'], 'slashing'))),
+        field('Category', h('select', { name: 'category' }, options(['simple melee', 'simple ranged', 'martial melee', 'martial ranged'], 'martial melee'))),
+        field('Magic', h('select', { name: 'bonus' }, [0, 1, 2, 3].map((n) => h('option', { value: n }, n ? `+${n}` : 'none')))),
+        h('label', { style: 'width:100%' }, 'Properties (comma-separated: Finesse, Light, Heavy, Reach, Two-Handed, Loading, Versatile (1d10), Thrown (20/60), Ammunition (80/320))', h('input', { name: 'properties' })),
+        h('button', {}, 'Add custom weapon'))),
+    s.sneakAttack && h('p', {}, h('button', { class: 'link', onclick: () => run(() => rollCheck(c, 'sneak')) }, `Sneak Attack ${s.sneakAttack}`), h('span', { class: 'muted' }, ' — once per turn, with a Finesse or ranged weapon and Advantage or an ally nearby')),
+    s.rage && h('p', {}, h('label', { class: 'inline' }, h('input', { type: 'checkbox', checked: s.rage.active || false,
+      onchange: (e) => run(async () => reloadCharacter(await api('PATCH', `/api/characters/${c.id}`, { raging: e.target.checked }))) }),
+      `Raging (+${s.rage.damage} damage on Strength attacks; ${s.rage.uses} rages per long rest)`)),
+    s.martialArtsDie && h('p', { class: 'muted' }, `Martial Arts die ${s.martialArtsDie} (unarmed, no armour or shield).`),
+    armorEditor(c, s), masteryEditor(c, s));
+}
+
+function armorEditor(c, s) {
+  return [h('h3', {}, `Armour · AC ${s.armorClass}`),
+    h('form', { onsubmit: onSubmit(async (f) => reloadCharacter(await api('PATCH', `/api/characters/${c.id}`, { armor: f.armor || null, shield: !!f.shield }))) },
+      field('Armour', h('select', { name: 'armor' }, h('option', { value: '' }, 'none'),
+        Object.entries(RULES.armor).filter(([n]) => n !== 'Shield').map(([n, a]) => h('option', { value: n, selected: c.armor === n || false },
+          `${n} (${a.category}, AC ${a.base}${a.dexMax === null ? ' + DEX' : a.dexMax ? ` + DEX max ${a.dexMax}` : ''})`)))),
+      check('Shield (+2)', 'shield', c.shield), h('button', {}, 'Save armour')),
+    s.armor.notes.length > 0 && h('ul', {}, s.armor.notes.map((n) => h('li', { class: 'muted' }, n)))];
+}
+
+function masteryEditor(c, s) {
+  const m = s.masteries;
+  if (!m.allowed) return null;
+  const cls = RULES.classes[c.className];
+  const proficient = Object.entries(RULES.weapons).filter(([, w]) => w.category.startsWith('simple') || cls.weapons === 'martial'
+    || (cls.martialIf || []).some((p) => w.properties.some((x) => x.startsWith(p)))).map(([n]) => n);
+  const save = (masteries) => run(async () => reloadCharacter(await api('PATCH', `/api/characters/${c.id}`, { masteries })));
+  return h('details', {}, h('summary', {}, `Weapon mastery (${m.chosen.length}/${m.allowed})`),
+    h('div', { style: 'display:flex;flex-wrap:wrap;gap:4px 12px' }, proficient.map((n) => h('label', { class: 'inline', title: RULES.masteries[RULES.mastery[n]] },
+      h('input', { type: 'checkbox', checked: m.chosen.includes(n) || false, disabled: !m.chosen.includes(n) && m.chosen.length >= m.allowed || false,
+        onchange: (e) => save(e.target.checked ? [...m.chosen, n] : m.chosen.filter((x) => x !== n)) }), `${n} (${RULES.mastery[n]})`))));
 }
 
 function spellsSection(c, s) {
@@ -312,7 +353,7 @@ function renderSheet() {
       h('progress', { max: s.maxHp, value: c.hp.current, 'aria-label': 'Hit points' }), hpForm,
       h('div', { style: 'display:flex;gap:8px' }, ['short', 'long'].map((k) => h('button', { onclick: () => run(async () =>
         reloadCharacter(await api('POST', `/api/characters/${c.id}/rest`, { kind: k }))) }, `${k[0].toUpperCase() + k.slice(1)} rest`))),
-      h('p', {}, `AC ${s.armorClass} (unarmored) · Speed ${s.speed} ft · Proficiency ${signed(s.proficiencyBonus)} · Passive Perception ${s.passivePerception} · Hit die ${s.hitDie} · `,
+      h('p', {}, `AC ${s.armorClass} (${s.armor.label}) · Speed ${s.speed} ft · Proficiency ${signed(s.proficiencyBonus)} · Passive Perception ${s.passivePerception} · Hit die ${s.hitDie} · `,
         roll('initiative', `Initiative ${signed(s.initiative)}`)),
       h('table', { style: 'width:100%;border-collapse:collapse' },
         h('tr', {}, h('th', { align: 'left' }, 'Ability'), h('th', {}, 'Score'), h('th', {}, 'Check'), h('th', {}, 'Save')),
