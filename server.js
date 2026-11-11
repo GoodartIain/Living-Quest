@@ -1,4 +1,4 @@
-// Living World — Milestone 0/1/2 vertical slice server. Node stdlib only.
+// Living Quest — server for Milestones 1–2. Node stdlib only.
 'use strict';
 const http = require('node:http');
 const fs = require('node:fs');
@@ -10,7 +10,9 @@ const AUTONOMY = ['static', 'scheduled', 'reactive', 'simulated', 'ai-assisted']
 const VISIBILITY = ['gm', 'party', 'public']; // gm: GM only, party: players, public: players + spectators
 const RANK = { none: 0, spectator: 1, player: 2, gm: 3 };
 const SEES = { gm: VISIBILITY, player: ['party', 'public'], spectator: ['public'], none: [] };
-const COLLECTIONS = ['users', 'worlds', 'campaigns', 'memberships', 'invites', 'locations', 'maps', 'pages', 'events'];
+const COLLECTIONS = ['users', 'worlds', 'campaigns', 'memberships', 'invites', 'locations', 'maps', 'pages',
+  'relationships', 'discoveries', 'revisions', 'events'];
+const LINK = /\[\[([^\]|]+)(?:\|[^\]]*)?\]\]/g; // [[id]], [[id|label]] or [[Title]]
 
 const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
 const id = () => crypto.randomUUID();
@@ -27,6 +29,20 @@ function oneOf(v, list, name) {
 function coord(v, name) {
   if (typeof v !== 'number' || !(v >= 0 && v <= 100)) fail(400, `${name} must be a number 0..100`);
   return v;
+}
+function bool(v, name) {
+  if (typeof v !== 'boolean') fail(400, `${name} must be true or false`);
+  return v;
+}
+function text(v, name) {
+  if (typeof v !== 'string' || v.length > 20000) fail(400, `${name} must be a string up to 20000 chars`);
+  return v;
+}
+function safeUrl(v) {
+  let u;
+  try { u = new URL(v); } catch { fail(400, 'imageUrl must be an absolute URL'); }
+  if (!['https:', 'http:'].includes(u.protocol)) fail(400, 'imageUrl must be http(s)');
+  return u.href;
 }
 
 // shortcut: whole state in one JSON file, rewritten per mutation; move to PostgreSQL (docs/ARCHITECTURE.md §3) before multi-user hosting.
@@ -62,35 +78,83 @@ function createApp({ file } = {}) {
     if (RANK[role] < RANK[min]) fail(role === 'none' ? 404 : 403, role === 'none' ? 'world not found' : 'not allowed');
     return role;
   }
-  const canSee = (role, loc) => SEES[role].includes(loc.visibility);
 
-  function newLocation(worldId, parentId, { name, type, x, y, visibility }) {
-    const loc = { id: id(), worldId, parentId, name, type, x, y, visibility, mapId: id(), pageId: id() };
+  // A viewer bound to one world: every visibility decision goes through here.
+  function viewer(user, worldId) {
+    const role = need(user, worldId, 'spectator');
+    const campaigns = new Set(db.memberships.filter((m) => m.userId === user.id && m.worldId === worldId).map((m) => m.campaignId));
+    const seesLoc = (loc) => {
+      if (!SEES[role].includes(loc.visibility)) return false;
+      if (loc.requiresDiscovery && role !== 'gm' &&
+        !db.discoveries.some((d) => d.locationId === loc.id && campaigns.has(d.campaignId))) return false;
+      return !loc.parentId || seesLoc(find('locations', loc.parentId)); // a hidden ancestor hides the whole subtree
+    };
+    const seesPage = (p) => (p.locationId ? seesLoc(find('locations', p.locationId)) : SEES[role].includes(p.visibility));
+    const seesRel = (r) => SEES[role].includes(r.visibility) && seesPage(find('pages', r.fromId)) && seesPage(find('pages', r.toId));
+    // Links render with the target's current title, or as [unknown] so a hidden page's title never leaks.
+    const renderLinks = (s) => s.replace(LINK, (m, key) => {
+      const p = db.pages.find((x) => x.id === key);
+      return p && seesPage(p) ? `[[${p.id}|${p.title}]]` : p ? '[unknown]' : m;
+    });
+    const brief = (p) => ({ id: p.id, title: p.title, kind: p.kind, locationId: p.locationId || null });
+    function viewPage(page) {
+      if (!seesPage(page)) fail(404, 'page not found');
+      const out = { ...page, body: renderLinks(page.body) };
+      if (role === 'gm') out.gmNotes = renderLinks(page.gmNotes); else delete out.gmNotes;
+      const token = `[[${page.id}]]`;
+      return {
+        page: out,
+        backlinks: db.pages.filter((p) => p.id !== page.id && seesPage(p) &&
+          (p.body.includes(token) || (role === 'gm' && p.gmNotes.includes(token)))).map(brief),
+        relationships: db.relationships.filter((r) => (r.fromId === page.id || r.toId === page.id) && seesRel(r))
+          .map((r) => ({ id: r.id, kind: r.kind, visibility: r.visibility, outgoing: r.fromId === page.id,
+            other: brief(find('pages', r.fromId === page.id ? r.toId : r.fromId)) })),
+      };
+    }
+    return { role, seesLoc, seesPage, viewPage, brief };
+  }
+
+  // On save, [[Title]] and [[id|label]] become [[id]] so renames never break links.
+  function normalizeLinks(worldId, s) {
+    return s.replace(LINK, (m, key) => {
+      key = key.trim();
+      if (db.pages.some((p) => p.id === key && p.worldId === worldId)) return `[[${key}]]`;
+      const hits = db.pages.filter((p) => p.worldId === worldId && p.title.toLowerCase() === key.toLowerCase());
+      return hits.length === 1 ? `[[${hits[0].id}]]` : m; // unknown or ambiguous titles stay as typed
+    });
+  }
+
+  function newPage(worldId, fields) {
+    const page = { id: id(), worldId, locationId: null, kind: 'lore', visibility: 'party', body: '', gmNotes: '', ...fields };
+    page.body = normalizeLinks(worldId, page.body);
+    page.gmNotes = normalizeLinks(worldId, page.gmNotes);
+    db.pages.push(page);
+    return page;
+  }
+
+  function newLocation(worldId, parentId, { name, type, x, y, visibility, requiresDiscovery }) {
+    const loc = { id: id(), worldId, parentId, name, type, x, y, visibility, requiresDiscovery, mapId: id(), pageId: null };
     db.maps.push({ id: loc.mapId, worldId, locationId: loc.id, name: `${name} map`, imageUrl: '' });
-    db.pages.push({ id: loc.pageId, worldId, locationId: loc.id, title: name, body: '', gmNotes: '' });
     db.locations.push(loc);
+    loc.pageId = newPage(worldId, { locationId: loc.id, kind: 'location', title: name }).id;
     return loc;
   }
 
-  // Only fields the role may see leave the server; hiding is never left to the client.
   function viewLocation(user, locId) {
     const loc = find('locations', locId);
-    const role = need(user, loc.worldId, 'spectator');
-    if (!canSee(role, loc)) fail(404, 'location not found');
+    const v = viewer(user, loc.worldId);
+    if (!v.seesLoc(loc)) fail(404, 'location not found');
     const trail = [];
-    for (let p = loc; p; p = p.parentId && find('locations', p.parentId)) {
-      if (!canSee(role, p)) break; // a hidden ancestor ends the trail rather than leaking its name
-      trail.unshift({ id: p.id, name: p.name, type: p.type });
-    }
-    const page = { ...find('pages', loc.pageId) };
-    if (role !== 'gm') delete page.gmNotes;
+    for (let p = loc; p; p = p.parentId && find('locations', p.parentId)) trail.unshift({ id: p.id, name: p.name, type: p.type });
     return {
-      role,
-      location: loc,
+      role: v.role,
+      location: v.role === 'gm'
+        ? { ...loc, discoveredIn: db.discoveries.filter((d) => d.locationId === loc.id).map((d) => d.campaignId) }
+        : loc,
       breadcrumbs: trail,
       map: find('maps', loc.mapId),
-      page,
-      children: db.locations.filter((c) => c.parentId === loc.id && canSee(role, c)),
+      ...v.viewPage(find('pages', loc.pageId)),
+      children: db.locations.filter((c) => c.parentId === loc.id && v.seesLoc(c)),
     };
   }
 
@@ -122,7 +186,8 @@ function createApp({ file } = {}) {
         },
       };
       db.worlds.push(world);
-      world.rootLocationId = newLocation(world.id, null, { name: world.name, type: 'world', x: 50, y: 50, visibility: 'public' }).id;
+      world.rootLocationId = newLocation(world.id, null,
+        { name: world.name, type: 'world', x: 50, y: 50, visibility: 'public', requiresDiscovery: false }).id;
       record(u.id, 'world.created', { worldId: world.id, settings: world.settings });
       return world;
     },
@@ -135,6 +200,45 @@ function createApp({ file } = {}) {
         role,
         campaigns: db.campaigns.filter((c) => c.worldId === p.id && (role === 'gm' || mine.has(c.id))),
       };
+    },
+    // Empty q lists every page the viewer may see.
+    'GET /api/worlds/:id/pages': (u, _b, p) => {
+      const v = viewer(u, p.id);
+      const q = (p.q || '').toLowerCase();
+      return db.pages
+        .filter((pg) => pg.worldId === p.id && v.seesPage(pg) &&
+          (!q || [pg.title, pg.body, v.role === 'gm' ? pg.gmNotes : ''].some((s) => s.toLowerCase().includes(q))))
+        .map(v.brief);
+    },
+    'POST /api/worlds/:id/pages': (u, b, p) => {
+      need(u, p.id, 'gm');
+      const page = newPage(p.id, {
+        title: str(b.title, 'title', 120),
+        kind: str(b.kind ?? 'lore', 'kind', 40),
+        visibility: oneOf(b.visibility ?? find('worlds', p.id).settings.defaultVisibility, VISIBILITY, 'visibility'),
+        body: text(b.body ?? '', 'body'),
+        gmNotes: text(b.gmNotes ?? '', 'gmNotes'),
+      });
+      record(u.id, 'page.created', { pageId: page.id });
+      return page;
+    },
+    'POST /api/worlds/:id/relationships': (u, b, p) => {
+      need(u, p.id, 'gm');
+      const [from, to] = [find('pages', b.fromId), find('pages', b.toId)];
+      if (from.worldId !== p.id || to.worldId !== p.id) fail(400, 'both pages must belong to this world');
+      if (from.id === to.id) fail(400, 'a page cannot relate to itself');
+      const rel = { id: id(), worldId: p.id, fromId: from.id, toId: to.id, kind: str(b.kind, 'kind', 60),
+        visibility: oneOf(b.visibility ?? 'party', VISIBILITY, 'visibility') };
+      db.relationships.push(rel);
+      record(u.id, 'relationship.created', rel);
+      return rel;
+    },
+    'DELETE /api/relationships/:id': (u, _b, p) => {
+      const rel = find('relationships', p.id);
+      need(u, rel.worldId, 'gm');
+      db.relationships.splice(db.relationships.indexOf(rel), 1);
+      record(u.id, 'relationship.deleted', rel); // the event keeps the full row, so deletes stay auditable
+      return { ok: true };
     },
     'POST /api/worlds/:id/campaigns': (u, b, p) => {
       need(u, p.id, 'gm');
@@ -195,17 +299,60 @@ function createApp({ file } = {}) {
         x: coord(b.x, 'x'),
         y: coord(b.y, 'y'),
         visibility: oneOf(b.visibility ?? find('worlds', parent.worldId).settings.defaultVisibility, VISIBILITY, 'visibility'),
+        requiresDiscovery: bool(b.requiresDiscovery ?? false, 'requiresDiscovery'),
       });
       record(u.id, 'location.created', { locationId: loc.id, parentId: parent.id });
       return loc;
     },
+    'PUT /api/locations/:id/discovery': (u, b, p) => {
+      const loc = find('locations', p.id);
+      need(u, loc.worldId, 'gm');
+      const campaign = find('campaigns', b.campaignId);
+      if (campaign.worldId !== loc.worldId) fail(400, 'campaign belongs to another world');
+      const discovered = bool(b.discovered, 'discovered');
+      const at = db.discoveries.findIndex((d) => d.locationId === loc.id && d.campaignId === campaign.id);
+      if (discovered && at < 0) db.discoveries.push({ id: id(), worldId: loc.worldId, locationId: loc.id, campaignId: campaign.id });
+      if (!discovered && at >= 0) db.discoveries.splice(at, 1);
+      record(u.id, 'location.discovery', { locationId: loc.id, campaignId: campaign.id, discovered });
+      return { discovered };
+    },
+    'GET /api/pages/:id': (u, _b, p) => {
+      const page = find('pages', p.id);
+      const v = viewer(u, page.worldId);
+      return { role: v.role, ...v.viewPage(page) };
+    },
+    'GET /api/pages/:id/history': (u, _b, p) => {
+      const page = find('pages', p.id);
+      need(u, page.worldId, 'gm');
+      return db.revisions.filter((r) => r.pageId === page.id).reverse();
+    },
+    'PATCH /api/pages/:id': (u, b, p) => {
+      const page = find('pages', p.id);
+      need(u, page.worldId, 'gm');
+      const changes = {};
+      if (b.title !== undefined) changes.title = str(b.title, 'title', 120);
+      if (b.body !== undefined) changes.body = normalizeLinks(page.worldId, text(b.body, 'body'));
+      if (b.gmNotes !== undefined) changes.gmNotes = normalizeLinks(page.worldId, text(b.gmNotes, 'gmNotes'));
+      if (!page.locationId) { // a location page follows its location's visibility
+        if (b.kind !== undefined) changes.kind = str(b.kind, 'kind', 40);
+        if (b.visibility !== undefined) changes.visibility = oneOf(b.visibility, VISIBILITY, 'visibility');
+      }
+      if (!Object.keys(changes).length) fail(400, 'nothing to change');
+      const { title, body, gmNotes, kind, visibility } = page;
+      db.revisions.push({ id: id(), pageId: page.id, worldId: page.worldId, at: new Date().toISOString(), actor: u.id,
+        title, body, gmNotes, kind, visibility });
+      Object.assign(page, changes);
+      if (changes.title && page.locationId) find('locations', page.locationId).name = changes.title;
+      record(u.id, 'page.updated', { id: page.id, fields: Object.keys(changes) });
+      return page;
+    },
   };
 
-  // GM edits: one generic PATCH per collection with a field whitelist. Ids never change, so renames never break links.
+  // GM edits for locations and maps: field whitelist. Ids never change, so renames never break links.
   const EDITABLE = {
-    locations: { name: (v) => str(v, 'name', 120), visibility: (v) => oneOf(v, VISIBILITY, 'visibility') },
+    locations: { name: (v) => str(v, 'name', 120), visibility: (v) => oneOf(v, VISIBILITY, 'visibility'),
+      requiresDiscovery: (v) => bool(v, 'requiresDiscovery') },
     maps: { name: (v) => str(v, 'name', 120), imageUrl: (v) => (v === '' ? v : safeUrl(v)) },
-    pages: { title: (v) => str(v, 'title', 120), body: (v) => text(v, 'body'), gmNotes: (v) => text(v, 'gmNotes') },
   };
   for (const c of Object.keys(EDITABLE)) {
     routes[`PATCH /api/${c}/:id`] = (u, b, p) => {
@@ -215,6 +362,7 @@ function createApp({ file } = {}) {
       for (const [k, check] of Object.entries(EDITABLE[c])) if (b[k] !== undefined) changes[k] = check(b[k]);
       if (!Object.keys(changes).length) fail(400, `nothing to change; editable: ${Object.keys(EDITABLE[c]).join(', ')}`);
       Object.assign(row, changes);
+      if (changes.name && c === 'locations') find('pages', row.pageId).title = changes.name;
       record(u.id, `${c.slice(0, -1)}.updated`, { id: row.id, fields: Object.keys(changes) });
       return row;
     };
@@ -225,15 +373,19 @@ function createApp({ file } = {}) {
     return { method, re: new RegExp('^' + pattern.replace(/:id/g, '([\\w-]+)') + '$'), fn };
   });
 
+  const STATIC = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8' };
   async function handle(req, res) {
     const url = new URL(req.url, 'http://x');
-    if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-      return res.end(fs.readFileSync(path.join(__dirname, 'public', 'index.html')));
+    if (req.method === 'GET' && !url.pathname.startsWith('/api/')) {
+      const name = path.basename(url.pathname) || 'index.html'; // basename: no path traversal out of public/
+      const file = path.join(__dirname, 'public', name);
+      if (!STATIC[path.extname(name)] || !fs.existsSync(file)) return send(res, 404, { error: 'not found' });
+      res.writeHead(200, { 'content-type': STATIC[path.extname(name)] });
+      return res.end(fs.readFileSync(file));
     }
     try {
       const route = table.find((r) => r.method === req.method && r.re.test(url.pathname)) || fail(404, 'no such route');
-      const params = { id: url.pathname.match(route.re)[1] };
+      const params = { id: url.pathname.match(route.re)[1], q: url.searchParams.get('q') };
       const body = req.method === 'GET' ? {} : await readJson(req);
       const anonymous = req.method === 'POST' && url.pathname === '/api/users';
       const user = anonymous ? null : authenticate(req);
@@ -253,16 +405,6 @@ function createApp({ file } = {}) {
   return { handle, db };
 }
 
-function text(v, name) {
-  if (typeof v !== 'string' || v.length > 20000) fail(400, `${name} must be a string up to 20000 chars`);
-  return v;
-}
-function safeUrl(v) {
-  let u;
-  try { u = new URL(v); } catch { fail(400, 'imageUrl must be an absolute URL'); }
-  if (!['https:', 'http:'].includes(u.protocol)) fail(400, 'imageUrl must be http(s)');
-  return u.href;
-}
 function readJson(req) {
   return new Promise((resolve, reject) => {
     let raw = '';
@@ -284,7 +426,7 @@ function send(res, status, body) {
 if (require.main === module) {
   const port = Number(process.env.PORT) || 3000;
   const { handle } = createApp({ file: process.env.DATA_FILE || path.join(__dirname, 'data.json') });
-  http.createServer(handle).listen(port, () => console.log(`Living World on http://localhost:${port}`));
+  http.createServer(handle).listen(port, () => console.log(`Living Quest on http://localhost:${port}`));
 }
 
 module.exports = { createApp };

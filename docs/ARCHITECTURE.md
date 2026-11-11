@@ -1,6 +1,6 @@
-# Living World — Architecture
+# Living Quest — Architecture
 
-Status: design for the whole platform; **only §3 Identity, World and the location/map/page part of Spatial are implemented** (see `MILESTONES.md`). Everything else here is a design, not code.
+Status: design for the whole platform; **implemented: Milestones 1–2 (§3 identity, world, wiki and location/map tables; §5 navigation)** (see `MILESTONES.md`). Everything else here is a design, not code.
 
 ## 1. Architecture diagram
 
@@ -98,9 +98,11 @@ erDiagram
 - **users** (id, name, token_hash) · **memberships** (user, world, campaign, role) · **invites** (code, campaign, role, accepted_by)
 - **worlds** (id, owner, settings{ruleset, advancement, npcAutonomy, calendar, defaultVisibility}, root_location)
 - **campaigns** (id, world, advancement{mode, source}) — the effective policy is copied at creation with its source, so a later world-default change never alters existing campaigns.
-- **locations** (id, world, parent, type, x, y, visibility, map_id, page_id) · **maps** (id, location, image_url) · **pages** (id, location, title, body, gm_notes)
+- **locations** (id, world, parent, type, x, y, visibility, requires_discovery, map_id, page_id) · **maps** (id, location, image_url)
+- **pages** (id, world, location?, kind, title, body, gm_notes, visibility) — the one authoritative wiki entity: NPCs, factions, items, lore, and each location's page. Links in text are stored as `[[page-id]]`.
+- **relationships** (from_page, to_page, kind, visibility) · **discoveries** (location, campaign) · **revisions** (page, at, actor, previous title/body/notes)
 - **events** (seq, at, actor, type, data) — append-only; the basis for audit, replay and snapshots.
-- Designed: `entities` (one row per NPC/item/faction/quest, typed JSON body + ruleset id), `placements` (entity in scene with xyz/rotation — never a copy of the entity), `relationships` (from, to, kind, weight, provenance_event), `characters`, `advancement_entries`, `downtime_windows`, `activity_requests`, `npc_state`, `memories` (npc, fact, provenance, scope), `proposals` (status, significance, payload), `snapshots`.
+- Designed: typed ruleset data on pages (stat blocks), `placements` (page/entity in scene with xyz/rotation — never a copy of the entity), relationship weight + provenance_event, `characters`, `advancement_entries`, `downtime_windows`, `activity_requests`, `npc_state`, `memories` (npc, fact, provenance, scope), `proposals` (status, significance, payload), `snapshots`.
 - Indexes (Postgres): `(world_id, parent_id)` on locations; `(campaign_id, game_time)` on events and activity requests; `GIN` on page tsvector filtered by visibility; `(region_id, next_wake_at)` on npc_state for the simulation queue; GiST on placements for spatial interest management.
 
 Stable ids: every reference stores an id, never a name. Renaming is a field update (tested in `test/slice.test.js`).
@@ -121,12 +123,16 @@ interface Zone { id; polygon: Vec3[]; trigger: Interaction[] }
 - Line of sight and fog are computed **server-side** from walls; clients receive only revealed placements. Camera mode (top-down, iso, orbit, 3rd, 1st person) is purely a client view and cannot reveal more than the projection sent.
 - 2D→3D conversion: GM traces walls over the floor plan → `Wall[]` with chosen height → editable geometry. Any automated detection only proposes walls.
 
-## 5. Hierarchical map navigation (implemented)
+## 5. Hierarchical map navigation and wiki (implemented)
 
 - Locations form a tree rooted at the world's root location. Each location links to its own map (pins = visible children at x/y in 0..100) and wiki page.
-- `GET /api/locations/:id` returns `{ role, location, breadcrumbs, map, page, children }` projected for the viewer: hidden children are omitted, `gmNotes` stripped for non-GMs, breadcrumbs stop at a hidden ancestor.
+- `GET /api/locations/:id` returns `{ role, location, breadcrumbs, map, page, relationships, backlinks, children }` projected for the viewer: hidden children are omitted and `gmNotes` stripped for non-GMs. A location is visible only if it and every ancestor are visible.
+- Discovery: a location with `requiresDiscovery` stays hidden from players and spectators until the GM marks it discovered for one of their campaigns, so campaigns sharing a world keep separate knowledge.
+- Links: GMs write `[[Title]]`; the server stores `[[id]]` (renames never break links) and renders `[[id|Current title]]`, or `[unknown]` when the reader may not see the target. Backlinks and relationships are filtered the same way.
+- Search: `GET /api/worlds/:id/pages?q=` substring match over pages the viewer may see; GM notes are searched only for GMs. Swap for Postgres full-text with the DB move.
+- History: every page edit stores the previous version; restore is saving an old version (itself a new revision).
 - Visibility tiers: `gm` < `party` (players) < `public` (players + spectators).
-- Next: discovery state per campaign (`discovered_by[campaign]`), knowledge-dependent marker text, links from a pin to scene / NPC / quest / custom action, travel rules that advance the clock.
+- Next: knowledge-dependent marker text, links from a pin to scene / NPC / quest / custom action, travel rules that advance the clock.
 
 ## 6. Characters and advancement
 

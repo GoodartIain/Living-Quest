@@ -3,53 +3,66 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Living World</title>
+<title>Living Quest</title>
 <style>
-  :root { --bg:#f6f3ee; --fg:#1f1d1a; --muted:#6b655c; --card:#fff; --line:#ddd5c8; --accent:#7a4b1f; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#16140f; --fg:#ece6dc; --muted:#a39a8c; --card:#211e18; --line:#3a352c; --accent:#e0a66a; } }
+  :root { --bg:#f6f3ee; --fg:#1f1d1a; --muted:#6b655c; --card:#fff; --line:#ddd5c8; --accent:#7a4b1f; --note:#fdf4e3; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#16140f; --fg:#ece6dc; --muted:#a39a8c; --card:#211e18; --line:#3a352c; --accent:#e0a66a; --note:#2b2418; } }
   * { box-sizing: border-box; }
   body { margin:0; font:15px/1.5 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
   header { padding:12px 16px; border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
   header h1 { font-size:18px; margin:0; margin-right:auto; }
   main { max-width:1100px; margin:0 auto; padding:16px; display:grid; gap:16px; }
-  section { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:16px; }
-  h2 { font-size:16px; margin:0 0 8px; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:16px; min-width:0; }
+  h2 { font-size:16px; margin:0 0 8px; } h3 { font-size:14px; margin:12px 0 4px; }
   form { display:flex; flex-wrap:wrap; gap:8px; align-items:end; margin:8px 0; }
   label { display:flex; flex-direction:column; font-size:12px; color:var(--muted); }
+  label.inline { flex-direction:row; gap:4px; align-items:center; }
   input, select, textarea, button { font:inherit; padding:6px 8px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--fg); }
-  textarea { width:100%; min-height:80px; }
+  textarea { width:100%; min-height:90px; }
   button { background:var(--accent); color:var(--card); border:none; cursor:pointer; }
   button.link { background:none; color:var(--accent); padding:0; text-decoration:underline; }
-  .row { display:grid; grid-template-columns: minmax(0,3fr) minmax(0,2fr); gap:16px; }
+  .row { display:grid; grid-template-columns: minmax(0,3fr) minmax(0,2fr); gap:16px; align-items:start; }
   @media (max-width: 760px) { .row { grid-template-columns: 1fr; } }
   .crumbs { display:flex; gap:6px; flex-wrap:wrap; color:var(--muted); }
   svg.map { width:100%; aspect-ratio:4/3; background:var(--bg); border:1px solid var(--line); border-radius:6px; }
   .pin circle { fill:var(--accent); cursor:pointer; } .pin text { fill:var(--fg); font-size:3px; }
   .muted { color:var(--muted); font-size:13px; } .err { color:#c0392b; min-height:1.5em; }
+  .note { background:var(--note); border-radius:6px; padding:8px; margin:8px 0; }
+  .prose p { white-space:pre-wrap; margin:6px 0; }
   ul { padding-left:18px; margin:4px 0; }
+  details { margin-top:8px; } summary { cursor:pointer; color:var(--accent); }
 </style>
 </head>
 <body>
-<header><h1>Living World</h1><span id="who" class="muted"></span></header>
+<header><h1>Living Quest</h1><span id="who" class="muted"></span></header>
 <main id="app"></main>
 <p id="err" class="err" role="alert" style="padding:0 16px"></p>
+<script src="markdown.js"></script>
 <script>
 const $app = document.getElementById('app');
-let token = localStorage.getItem('lw-token');
-const state = { world: null, loc: null, pick: null };
+let token = localStorage.getItem('lq-token');
+// loc: current location view; page: a non-location page open beside the map; results: search hits.
+const state = { world: null, loc: null, page: null, pages: [], results: null, pick: null };
 
-// Build DOM with textContent only, so user-entered names never become HTML.
+// Build DOM with textContent only, so user-entered text never becomes HTML.
 function h(tag, attrs = {}, ...kids) {
   const el = document.createElementNS(tag === 'svg' || attrs.svg ? 'http://www.w3.org/2000/svg' : 'http://www.w3.org/1999/xhtml', tag);
   for (const [k, v] of Object.entries(attrs)) {
     if (k === 'svg') continue;
     if (k.startsWith('on')) el.addEventListener(k.slice(2), v); else if (v !== false && v != null) el.setAttribute(k, v);
   }
-  for (const k of kids.flat()) if (k != null) el.append(k.nodeType ? k : String(k));
+  for (const k of kids.flat()) if (k != null && k !== false) el.append(k.nodeType ? k : String(k));
   return el;
 }
 const field = (label, input) => h('label', {}, label, input);
+const check = (label, name, on) => h('label', { class: 'inline' }, h('input', { type: 'checkbox', name, checked: on || false }), label);
 const options = (list, sel) => list.map((v) => h('option', { value: v, selected: v === sel || false }, v));
+const linkTo = (p, label) => h('button', { class: 'link', onclick: () => run(() => openPage(p.id)) }, label || p.title);
+
+function markdown(src) {
+  const inl = (parts) => parts.map((t) => typeof t === 'string' ? t : t.b ? h('strong', {}, inl(t.b)) : t.i ? h('em', {}, inl(t.i)) : linkTo({ id: t.link }, t.text));
+  return h('div', { class: 'prose' }, parseMarkdown(src).map((b) => b.tag === 'ul' ? h('ul', {}, b.items.map((i) => h('li', {}, inl(i)))) : h(b.tag, {}, inl(b.inline))));
+}
 
 async function api(method, url, body) {
   const res = await fetch(url, { method, headers: { 'content-type': 'application/json', ...(token && { authorization: 'Bearer ' + token }) }, body: body && JSON.stringify(body) });
@@ -59,7 +72,7 @@ async function api(method, url, body) {
 }
 async function run(fn) {
   document.getElementById('err').textContent = '';
-  try { await fn(); } catch (e) { document.getElementById('err').textContent = e.message; if (e.status === 401) { token = null; localStorage.removeItem('lw-token'); render(); } }
+  try { await fn(); } catch (e) { document.getElementById('err').textContent = e.message; if (e.status === 401) { token = null; localStorage.removeItem('lq-token'); render(); } }
 }
 function onSubmit(fn) { return (e) => { e.preventDefault(); const f = Object.fromEntries(new FormData(e.target)); run(() => fn(f, e.target)); }; }
 
@@ -71,7 +84,7 @@ async function render() {
     document.getElementById('who').textContent = '';
     return $app.append(h('section', {}, h('h2', {}, 'Sign in'),
       h('p', { class: 'muted' }, 'Development sign-in: pick a display name. Your session token is kept in this browser.'),
-      h('form', { onsubmit: onSubmit(async (f) => { const r = await api('POST', '/api/users', f); token = r.token; localStorage.setItem('lw-token', token); render(); }) },
+      h('form', { onsubmit: onSubmit(async (f) => { const r = await api('POST', '/api/users', f); token = r.token; localStorage.setItem('lq-token', token); render(); }) },
         field('Name', h('input', { name: 'name', required: true })), h('button', {}, 'Continue'))));
   }
   const me = await api('GET', '/api/me');
@@ -94,17 +107,45 @@ async function render() {
 
 async function openWorld(id) {
   state.world = await api('GET', `/api/worlds/${id}`);
-  state.loc = await api('GET', `/api/locations/${state.world.rootLocationId}`);
+  state.pages = await api('GET', `/api/worlds/${id}/pages`);
+  state.results = null;
+  await go(state.world.rootLocationId);
+}
+async function go(locId) {
+  state.loc = await api('GET', `/api/locations/${locId}`);
+  state.page = null; state.pick = null;
   render();
 }
-async function go(locId) { state.loc = await api('GET', `/api/locations/${locId}`); state.pick = null; render(); }
+async function openPage(id) {
+  const v = await api('GET', `/api/pages/${id}`);
+  if (v.page.locationId) return go(v.page.locationId);
+  state.page = v;
+  render();
+}
+async function refresh() {
+  state.pages = await api('GET', `/api/worlds/${state.world.id}/pages`);
+  const pageId = state.page && state.page.page.id;
+  await go(state.loc.location.id);
+  if (pageId) await openPage(pageId);
+}
 
 function renderWorld() {
   const w = state.world, v = state.loc, gm = w.role === 'gm';
   $app.append(h('section', {},
     h('div', { class: 'crumbs' }, h('button', { class: 'link', onclick: () => { state.world = null; render(); } }, 'All worlds'), '›', h('strong', {}, w.name), h('span', {}, `(${w.role})`)),
     h('p', { class: 'muted' }, `Ruleset ${w.settings.ruleset} · default advancement ${w.settings.advancement} · NPC autonomy ${w.settings.npcAutonomy}`),
-    gm ? campaignsPanel(w) : h('p', { class: 'muted' }, 'Campaigns: ' + w.campaigns.map((c) => `${c.name} (${c.advancement.mode})`).join(', '))));
+    gm ? campaignsPanel(w) : h('p', { class: 'muted' }, 'Campaigns: ' + w.campaigns.map((c) => `${c.name} (${c.advancement.mode})`).join(', ')),
+    h('form', { role: 'search', onsubmit: onSubmit(async (f) => { state.results = await api('GET', `/api/worlds/${w.id}/pages?q=${encodeURIComponent(f.q)}`); render(); }) },
+      field('Search the wiki (empty lists all)', h('input', { name: 'q', type: 'search' })), h('button', {}, 'Search')),
+    state.results && h('div', {}, state.results.length
+      ? h('ul', {}, state.results.map((p) => h('li', {}, linkTo(p), ` — ${p.kind}`)))
+      : h('p', { class: 'muted' }, 'No matches.')),
+    gm && h('form', { onsubmit: onSubmit(async (f) => { const p = await api('POST', `/api/worlds/${w.id}/pages`, f); state.pages = await api('GET', `/api/worlds/${w.id}/pages`); await openPage(p.id); }) },
+      field('New entry', h('input', { name: 'title', required: true })),
+      field('Kind', h('input', { name: 'kind', value: 'npc', list: 'kinds', size: 8 })),
+      h('datalist', { id: 'kinds' }, options(['npc', 'creature', 'faction', 'item', 'event', 'quest', 'religion', 'culture', 'lore'])),
+      field('Visible to', h('select', { name: 'visibility' }, options(['gm', 'party', 'public'], 'party'))),
+      h('button', {}, 'Create entry'))));
 
   const pins = v.children.map((c) => h('g', { svg: 1, class: 'pin', tabindex: 0, role: 'button', 'aria-label': `Open ${c.name}`,
       onclick: () => run(() => go(c.id)), onkeydown: (e) => e.key === 'Enter' && run(() => go(c.id)) },
@@ -124,10 +165,10 @@ function renderWorld() {
       h('nav', { class: 'crumbs', 'aria-label': 'Breadcrumbs' }, v.breadcrumbs.flatMap((b, i) => [i ? '›' : null, i === v.breadcrumbs.length - 1 ? h('strong', {}, b.name) : h('button', { class: 'link', onclick: () => run(() => go(b.id)) }, b.name)])),
       h('h2', {}, `${v.location.name} `, h('span', { class: 'muted' }, v.location.type)),
       svg,
-      v.children.length ? h('ul', {}, v.children.map((c) => h('li', {}, h('button', { class: 'link', onclick: () => run(() => go(c.id)) }, c.name), ` — ${c.type}`, gm ? ` [${c.visibility}]` : ''))) : h('p', { class: 'muted' }, 'No known places here.'),
-      gm && addPlaceForm(v)),
-    h('section', {}, h('h2', {}, v.page.title),
-      gm ? pageEditor(v) : [h('p', { style: 'white-space:pre-wrap' }, v.page.body || '—')])));
+      v.children.length ? h('ul', {}, v.children.map((c) => h('li', {}, h('button', { class: 'link', onclick: () => run(() => go(c.id)) }, c.name), ` — ${c.type}`,
+        gm ? ` [${c.visibility}${c.requiresDiscovery ? ', needs discovery' : ''}]` : ''))) : h('p', { class: 'muted' }, 'No known places here.'),
+      gm && addPlaceForm(v), gm && locationSettings(v)),
+    pagePanel(state.page || v, gm)));
 }
 
 function campaignsPanel(w) {
@@ -151,27 +192,78 @@ function campaignsPanel(w) {
 function addPlaceForm(v) {
   return h('form', { onsubmit: onSubmit(async (f) => {
       if (!state.pick) throw new Error('Click the map to choose where the place goes.');
-      const loc = await api('POST', `/api/locations/${v.location.id}/children`, { ...f, ...state.pick });
-      state.pick = null; await go(v.location.id); return loc;
+      await api('POST', `/api/locations/${v.location.id}/children`, { name: f.name, type: f.type, visibility: f.visibility, requiresDiscovery: !!f.requiresDiscovery, ...state.pick });
+      await refresh();
     }) },
     field('New place', h('input', { name: 'name', required: true })),
     field('Type', h('input', { name: 'type', value: v.location.type === 'world' ? 'town' : 'building', size: 8 })),
     field('Visible to', h('select', { name: 'visibility' }, options(['gm', 'party', 'public'], 'party'))),
+    check('Hidden until discovered', 'requiresDiscovery'),
     h('button', {}, state.pick ? `Add at ${state.pick.x},${state.pick.y}` : 'Click map, then add'));
 }
 
+function locationSettings(v) {
+  const loc = v.location;
+  return h('details', {}, h('summary', {}, 'Place settings'),
+    h('form', { onsubmit: onSubmit(async (f) => {
+        await api('PATCH', `/api/locations/${loc.id}`, { visibility: f.visibility, requiresDiscovery: !!f.requiresDiscovery });
+        if (f.imageUrl !== v.map.imageUrl) await api('PATCH', `/api/maps/${v.map.id}`, { imageUrl: f.imageUrl });
+        await refresh();
+      }) },
+      field('Visible to', h('select', { name: 'visibility' }, options(['gm', 'party', 'public'], loc.visibility))),
+      check('Hidden until discovered', 'requiresDiscovery', loc.requiresDiscovery),
+      h('label', { style: 'width:100%' }, 'Map image URL', h('input', { name: 'imageUrl', type: 'url', value: v.map.imageUrl })),
+      h('button', {}, 'Save place')),
+    loc.requiresDiscovery && h('div', {}, h('p', { class: 'muted' }, 'Discovered by:'),
+      state.world.campaigns.map((c) => h('label', { class: 'inline' },
+        h('input', { type: 'checkbox', checked: loc.discoveredIn.includes(c.id) || false,
+          onchange: (e) => run(async () => { await api('PUT', `/api/locations/${loc.id}/discovery`, { campaignId: c.id, discovered: e.target.checked }); await refresh(); }) }),
+        c.name))));
+}
+
+function pagePanel(v, gm) {
+  const p = v.page;
+  return h('section', {},
+    state.page && h('button', { class: 'link', onclick: () => { state.page = null; render(); } }, `‹ back to ${state.loc.location.name}`),
+    h('h2', {}, p.title, ' ', h('span', { class: 'muted' }, p.kind + (gm && !p.locationId ? ` · ${p.visibility}` : ''))),
+    p.body ? markdown(p.body) : h('p', { class: 'muted' }, 'Nothing written yet.'),
+    gm && p.gmNotes && h('div', { class: 'note' }, h('strong', {}, 'GM notes'), markdown(p.gmNotes)),
+    h('h3', {}, 'Connections'),
+    v.relationships.length ? h('ul', {}, v.relationships.map((r) => h('li', {},
+      r.outgoing ? [`${r.kind} `, linkTo(r.other)] : [linkTo(r.other), ` ${r.kind} this`],
+      gm && [` [${r.visibility}] `, h('button', { class: 'link', 'aria-label': 'Remove connection', onclick: () => run(async () => { await api('DELETE', `/api/relationships/${r.id}`); await refresh(); }) }, 'remove')])))
+      : h('p', { class: 'muted' }, 'None known.'),
+    gm && h('form', { onsubmit: onSubmit(async (f) => { await api('POST', `/api/worlds/${state.world.id}/relationships`, { ...f, [f.dir === 'from' ? 'toId' : 'fromId']: p.id, [f.dir === 'from' ? 'fromId' : 'toId']: f.other, other: undefined, dir: undefined }); await refresh(); }) },
+      field('Entry', h('select', { name: 'other', required: true }, state.pages.filter((x) => x.id !== p.id).map((x) => h('option', { value: x.id }, `${x.title} (${x.kind})`)))),
+      field('Direction', h('select', { name: 'dir' }, h('option', { value: 'from' }, 'entry → this'), h('option', { value: 'to' }, 'this → entry'))),
+      field('Relation', h('input', { name: 'kind', required: true, placeholder: 'lives at', size: 10 })),
+      field('Visible to', h('select', { name: 'visibility' }, options(['gm', 'party', 'public'], 'party'))),
+      h('button', {}, 'Connect')),
+    v.backlinks.length > 0 && [h('h3', {}, 'Mentioned in'), h('ul', {}, v.backlinks.map((b) => h('li', {}, linkTo(b))))],
+    gm && pageEditor(v));
+}
+
 function pageEditor(v) {
-  return h('form', { onsubmit: onSubmit(async (f) => {
-      await api('PATCH', `/api/pages/${v.page.id}`, { body: f.body, gmNotes: f.gmNotes });
-      if (f.imageUrl !== v.map.imageUrl) await api('PATCH', `/api/maps/${v.map.id}`, { imageUrl: f.imageUrl });
-      if (f.name !== v.location.name) await api('PATCH', `/api/locations/${v.location.id}`, { name: f.name });
-      await go(v.location.id);
-    }) },
-    field('Name', h('input', { name: 'name', value: v.location.name, required: true })),
-    h('label', { style: 'width:100%' }, 'Player-facing lore', h('textarea', { name: 'body' }, v.page.body)),
-    h('label', { style: 'width:100%' }, 'GM-only notes', h('textarea', { name: 'gmNotes' }, v.page.gmNotes)),
-    h('label', { style: 'width:100%' }, 'Map image URL', h('input', { name: 'imageUrl', type: 'url', value: v.map.imageUrl })),
-    h('button', {}, 'Save'));
+  const p = v.page;
+  const history = h('ul', {});
+  return h('details', {}, h('summary', {}, 'Edit entry'),
+    h('form', { onsubmit: onSubmit(async (f) => {
+        await api('PATCH', `/api/pages/${p.id}`, { title: f.title, body: f.body, gmNotes: f.gmNotes, ...(!p.locationId && { kind: f.kind, visibility: f.visibility }) });
+        await refresh();
+      }) },
+      field('Title', h('input', { name: 'title', value: p.title, required: true })),
+      !p.locationId && [field('Kind', h('input', { name: 'kind', value: p.kind, size: 8 })),
+        field('Visible to', h('select', { name: 'visibility' }, options(['gm', 'party', 'public'], p.visibility)))],
+      h('p', { class: 'muted', style: 'width:100%;margin:0' }, 'Markdown: # heading, **bold**, *italic*, - list. Link entries with [[Entry title]].'),
+      h('label', { style: 'width:100%' }, 'Player-facing text', h('textarea', { name: 'body' }, p.body)),
+      h('label', { style: 'width:100%' }, 'GM-only notes', h('textarea', { name: 'gmNotes' }, p.gmNotes)),
+      h('button', {}, 'Save')),
+    h('details', { ontoggle: (e) => e.target.open && run(async () => {
+        const revs = await api('GET', `/api/pages/${p.id}/history`);
+        history.replaceChildren(...(revs.length ? revs.map((r) => h('li', {}, new Date(r.at).toLocaleString(), ` — ${r.title} `,
+          h('button', { class: 'link', onclick: () => run(async () => { await api('PATCH', `/api/pages/${p.id}`, { title: r.title, body: r.body, gmNotes: r.gmNotes }); await refresh(); }) }, 'restore')))
+          : [h('li', { class: 'muted' }, 'No earlier versions.')]));
+      }) }, h('summary', {}, 'History'), history));
 }
 
 run(render);

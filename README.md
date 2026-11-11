@@ -1,6 +1,6 @@
-# Living-Quest
+# Living Quest
 
-Browser tabletop / worldbuilding platform. This repository holds the first vertical slice: worlds, campaigns, advancement settings, invites, and nested map → wiki navigation with server-enforced visibility.
+Browser tabletop / worldbuilding platform. This repository holds Milestones 1–2: worlds, campaigns, advancement settings, invites, nested maps, a linked wiki (NPCs, factions, lore) with relationships, backlinks, search, history and per-campaign discovery, all with server-enforced visibility.
 
 ```sh
 node server.js            # http://localhost:3000, data in ./data.json (PORT, DATA_FILE override)
