@@ -115,15 +115,34 @@ const FULL_SLOTS = [[2], [3], [4, 2], [4, 3], [4, 3, 2], [4, 3, 3], [4, 3, 3, 1]
 const PACT = [[1, 1], [2, 1], [2, 2], [2, 2], [2, 3], [2, 3], [2, 4], [2, 4], [2, 5], [2, 5],
   [3, 5], [3, 5], [3, 5], [3, 5], [3, 5], [3, 5], [4, 5], [4, 5], [4, 5], [4, 5]];
 
+const SPELLS = new Map(DATA.spells.map((sp) => [sp.name, sp]));
+const MAGIC_INITIATE_ABILITY = { Cleric: 'wis', Druid: 'wis', Wizard: 'int' }; // the feat lets you pick INT, WIS or CHA; these are the usual picks
+
+// Spellcasting from the class table, plus Magic Initiate (2 cantrips and one level 1 spell, castable once per long rest without a slot).
 function spellcasting(c, level, mods, pb) {
   const cls = CLASSES[c.className];
-  if (!cls.caster) return null;
-  const m = mods[cls.castingAbility];
-  const out = { ability: cls.castingAbility, saveDC: 8 + pb + m, attackBonus: pb + m, slots: [], pact: null };
+  const initiate = (c.feats || []).map((f) => f.match(/^Magic Initiate \((\w+)\)$/)).find(Boolean);
+  if (!cls.caster && !initiate) return null;
+  const ability = cls.caster ? cls.castingAbility : MAGIC_INITIATE_ABILITY[initiate[1]] || 'int';
+  const m = mods[ability];
+  const row = DATA.classes[c.className].levels[level - 1] || {};
+  const out = { ability, saveDC: 8 + pb + m, attackBonus: pb + m, slots: [], pact: null,
+    cantripsMax: (row.cantrips || 0) + (initiate ? 2 : 0), preparedMax: (row.prepared || 0) + (initiate ? 1 : 0),
+    freeCast: initiate ? `Magic Initiate (${initiate[1]})` : null };
   if (cls.caster === 'full') out.slots = FULL_SLOTS[level - 1];
   if (cls.caster === 'half') out.slots = FULL_SLOTS[Math.ceil(level / 2) - 1];
   if (cls.caster === 'pact') out.pact = { count: PACT[level - 1][0], level: PACT[level - 1][1] };
   return out;
+}
+
+// A character's spell entry is either { srd: 'Fireball' } (catalogue) or a custom spell with its own formula.
+function resolveSpell(e) {
+  if (e.srd) {
+    const sp = SPELLS.get(e.srd);
+    return { ...sp, id: e.id, srd: e.srd, prepared: e.prepared };
+  }
+  return { ...e, srd: null, damage: e.damage ? { dice: e.damage, type: e.damageType || '', addMod: false } : null, heal: null, cantripDice: null, perSlot: null,
+    description: e.notes || '' };
 }
 
 // Per-level class numbers from the SRD tables (Sneak Attack dice, Rage damage, Martial Arts die, mastery count…).
@@ -315,4 +334,4 @@ const options = {
   attribution: 'Includes material from the System Reference Document 5.2.1 ("SRD 5.2.1") by Wizards of the Coast LLC, licensed under CC-BY-4.0.',
 };
 
-module.exports = { id: 'srd-5.2.1', options, create, derive, xpLevel, proficiency, MAX_LEVEL, CONDITIONS, SKILLS, ABILITIES, WEAPONS, DATA, masteryCount, spellFormulas, weaponProficient };
+module.exports = { id: 'srd-5.2.1', options, create, derive, xpLevel, proficiency, MAX_LEVEL, CONDITIONS, SKILLS, ABILITIES, WEAPONS, DATA, masteryCount, spellFormulas, weaponProficient, resolveSpell, SPELLS };

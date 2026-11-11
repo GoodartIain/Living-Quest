@@ -272,47 +272,90 @@ function masteryEditor(c, s) {
         onchange: (e) => save(e.target.checked ? [...m.chosen, n] : m.chosen.filter((x) => x !== n)) }), `${n} (${RULES.mastery[n]})`))));
 }
 
-function spellsSection(c, s) {
-  const sc = s.spellcasting;
+let SPELL_CATALOG = null;
+const loadSpells = async () => (SPELL_CATALOG ||= await api('GET', '/api/ruleset/spells'));
+
+function spellsSection(v) {
+  const c = v.character, s = v.sheet, sc = s.spellcasting;
   const used = c.slotsUsed || {};
   const pips = (n, max) => '●'.repeat(Math.max(0, max - n)) + '○'.repeat(Math.min(n, max));
   const saveList = (spells) => run(async () => reloadCharacter(await api('PATCH', `/api/characters/${c.id}`, { spells })));
-  const cast = (sp, slotLevel) => run(async () => {
+  const cast = (sp, slotLevel, free) => run(async () => {
     const o = rollOpts();
-    const r = await api('POST', `/api/characters/${c.id}/cast`, { spellId: sp.id, slotLevel, mode: o.mode, visibility: o.visibility, crit: !!o.crit });
+    const r = await api('POST', `/api/characters/${c.id}/cast`, { spellId: sp.id, slotLevel, free, mode: o.mode, visibility: o.visibility, crit: !!o.crit });
     state.lastRolls = r.rolls;
-    state.lastNote = `${c.name} cast ${sp.name}${slotLevel ? ` with a level ${slotLevel} slot` : sc.pact && sp.level ? ' with a pact slot' : ''}.`;
+    state.lastNote = `${c.name} cast ${sp.name}${free ? ' (Magic Initiate, no slot)' : slotLevel ? ` with a level ${slotLevel} slot` : ''}.`;
     await reloadCharacter(r);
   });
-  const levels = sc ? (sc.pact ? [] : sc.slots.map((max, i) => i + 1)) : [];
-  const spells = [...c.spells].sort((a, b) => a.level - b.level || a.name.localeCompare(b.name));
+  if (!sc) return h('section', {}, h('h3', {}, 'Spellcasting'), h('p', { class: 'muted' }, `${c.className}s do not cast spells.`));
+  const ready = v.spells.filter((sp) => sp.prepared);
+  const cantrips = ready.filter((sp) => sp.level === 0).length;
+  const spells = [...v.spells].sort((a, b) => a.level - b.level || a.name.localeCompare(b.name));
+  const summary = (sp) => [sp.attack === 'attack' ? 'spell attack' : sp.attack === 'save' ? `${sp.saveAbility.toUpperCase()} save` : '',
+    sp.castingTime, sp.range, sp.components, sp.duration, sp.concentration ? 'Concentration' : '', sp.ritual ? 'Ritual' : ''].filter(Boolean).join(' · ');
+  const formula = (f) => [f.damage && `${f.damage} damage`, f.heal && `${f.heal} healing`].filter(Boolean).join(', ');
   return h('section', {}, h('h3', {}, 'Spellcasting'),
-    !sc ? h('p', { class: 'muted' }, `${c.className}s do not cast spells.`) : [
-      h('p', {}, `${sc.ability.toUpperCase()} · Save DC ${sc.saveDC} · `,
-        h('button', { class: 'link', onclick: () => run(() => rollCheck(c, 'spellattack')) }, `Spell attack ${signed(sc.attackBonus)}`)),
-      sc.pact
-        ? h('p', {}, `Pact slots (level ${sc.pact.level}): `, h('span', { 'aria-label': `${sc.pact.count - (used.pact || 0)} of ${sc.pact.count} left` }, pips(used.pact || 0, sc.pact.count)))
-        : h('p', {}, sc.slots.map((max, i) => h('span', { style: 'margin-right:12px', 'aria-label': `level ${i + 1}: ${max - (used[i + 1] || 0)} of ${max} left` }, `L${i + 1} ${pips(used[i + 1] || 0, max)}`))),
-      spells.length ? h('ul', {}, spells.map((sp) => h('li', {},
-        h('strong', {}, sp.name), ` — ${sp.level ? `level ${sp.level}` : 'cantrip'}`,
-        sp.attack === 'attack' ? ' · spell attack' : sp.attack === 'save' ? ` · ${sp.saveAbility.toUpperCase()} save` : '',
-        sp.damage ? ` · ${sp.damage}${sp.damageType ? ` ${sp.damageType}` : ''}` : '', sp.notes ? h('span', { class: 'muted' }, ` · ${sp.notes}`) : '', ' ',
-        sp.level === 0 || sc.pact
-          ? h('button', { class: 'link', onclick: () => cast(sp) }, 'Cast')
-          : levels.filter((l) => l >= sp.level).map((l) => h('button', { class: 'link', style: 'margin-right:6px', 'aria-label': `Cast ${sp.name} with a level ${l} slot`, onclick: () => cast(sp, l) }, `Cast L${l}`)),
-        ' ', h('button', { class: 'link', onclick: () => saveList(c.spells.filter((x) => x.id !== sp.id)) }, 'remove'))))
-        : h('p', { class: 'muted' }, 'No spells yet. Add the spells your character knows or has prepared from your rulebook.'),
-      h('details', {}, h('summary', {}, 'Add a spell'),
-        h('form', { onsubmit: onSubmit((f) => saveList([...c.spells, { name: f.name, level: +f.level, attack: f.attack, saveAbility: f.attack === 'save' ? f.saveAbility : undefined,
-            damage: f.damage || undefined, damageType: f.damageType, notes: f.notes }])) },
-          field('Name', h('input', { name: 'name', required: true })),
-          field('Level', h('select', { name: 'level' }, h('option', { value: 0 }, 'cantrip'), [1, 2, 3, 4, 5, 6, 7, 8, 9].map((l) => h('option', { value: l }, l)))),
-          field('Resolved by', h('select', { name: 'attack' }, h('option', { value: 'none' }, 'nothing to roll'), h('option', { value: 'attack' }, 'spell attack'), h('option', { value: 'save' }, 'saving throw'))),
-          field('Save', h('select', { name: 'saveAbility' }, options(['str', 'dex', 'con', 'int', 'wis', 'cha'], 'dex'))),
-          field('Damage (optional)', h('input', { name: 'damage', placeholder: '3d6', size: 6 })),
-          field('Type', h('input', { name: 'damageType', placeholder: 'fire', size: 8 })),
-          h('label', { style: 'width:100%' }, 'Notes', h('input', { name: 'notes', placeholder: 'range, duration, higher-level effect…' })),
-          h('button', {}, 'Add spell')))]);
+    h('p', {}, `${sc.ability.toUpperCase()} · Save DC ${sc.saveDC} · `,
+      h('button', { class: 'link', onclick: () => run(() => rollCheck(c, 'spellattack')) }, `Spell attack ${signed(sc.attackBonus)}`),
+      ` · Cantrips ${cantrips}/${sc.cantripsMax} · Prepared ${ready.length - cantrips}/${sc.preparedMax}`),
+    sc.pact
+      ? h('p', {}, `Pact slots (level ${sc.pact.level}): `, h('span', { 'aria-label': `${sc.pact.count - (used.pact || 0)} of ${sc.pact.count} left` }, pips(used.pact || 0, sc.pact.count)))
+      : sc.slots.length > 0 && h('p', {}, sc.slots.map((max, i) => h('span', { style: 'margin-right:12px', 'aria-label': `level ${i + 1}: ${max - (used[i + 1] || 0)} of ${max} left` }, `L${i + 1} ${pips(used[i + 1] || 0, max)}`))),
+    sc.freeCast && h('p', { class: 'muted' }, `${sc.freeCast}: one level 1 spell without a slot per long rest (${used.free ? 'used' : 'available'}).`),
+    spells.length ? h('ul', { style: 'padding-left:0;list-style:none' }, spells.map((sp) => h('li', { style: 'margin:6px 0' },
+      h('label', { class: 'inline', title: 'Prepared' }, h('input', { type: 'checkbox', checked: sp.prepared || false, 'aria-label': `${sp.name} prepared`,
+        onchange: () => saveList(c.spells.map((e) => (e.id === sp.id ? { ...e, prepared: !e.prepared } : e))) }), h('strong', {}, sp.name)),
+      ` — ${sp.level ? `level ${sp.level}` : 'cantrip'}${sp.school ? ` ${sp.school.toLowerCase()}` : ''}${sp.srd ? '' : ' (custom)'}`,
+      h('div', { class: 'muted' }, summary(sp)),
+      sp.prepared && h('div', {}, Object.entries(sp.at).map(([lvl, f]) => h('button', { class: 'link', style: 'margin-right:10px',
+        'aria-label': `Cast ${sp.name}${sp.level ? ` with a level ${lvl} slot` : ''}`, onclick: () => cast(sp, sp.level && !sc.pact ? +lvl : undefined) },
+        `Cast${sp.level ? ` L${lvl}` : ''}${formula(f) ? ` · ${formula(f)}` : ''}`)),
+        sc.freeCast && sp.level === 1 && h('button', { class: 'link', onclick: () => cast(sp, undefined, true) }, 'Cast free (Magic Initiate)')),
+      h('details', {}, h('summary', {}, 'Description'), h('p', { style: 'white-space:pre-wrap' }, sp.description || '—'),
+        sp.higherLevel && h('p', { style: 'white-space:pre-wrap' }, h('em', {}, 'At higher levels. '), sp.higherLevel)),
+      h('button', { class: 'link', onclick: () => saveList(c.spells.filter((e) => e.id !== sp.id)) }, 'remove'))))
+      : h('p', { class: 'muted' }, 'No spells yet.'),
+    spellPicker(c),
+    h('details', {}, h('summary', {}, 'Add a custom spell'),
+      h('form', { onsubmit: onSubmit((f) => saveList([...c.spells, { name: f.name, level: +f.level, attack: f.attack, saveAbility: f.attack === 'save' ? f.saveAbility : undefined,
+          damage: f.damage || undefined, damageType: f.damageType, notes: f.notes }])) },
+        field('Name', h('input', { name: 'name', required: true })),
+        field('Level', h('select', { name: 'level' }, h('option', { value: 0 }, 'cantrip'), [1, 2, 3, 4, 5, 6, 7, 8, 9].map((l) => h('option', { value: l }, l)))),
+        field('Resolved by', h('select', { name: 'attack' }, h('option', { value: 'none' }, 'nothing to roll'), h('option', { value: 'attack' }, 'spell attack'), h('option', { value: 'save' }, 'saving throw'))),
+        field('Save', h('select', { name: 'saveAbility' }, options(['str', 'dex', 'con', 'int', 'wis', 'cha'], 'dex'))),
+        field('Damage (optional)', h('input', { name: 'damage', placeholder: '3d6', size: 6 })),
+        field('Type', h('input', { name: 'damageType', placeholder: 'fire', size: 8 })),
+        h('label', { style: 'width:100%' }, 'Notes', h('input', { name: 'notes', placeholder: 'range, duration, higher-level effect…' })),
+        h('button', {}, 'Add spell'))));
+}
+
+function spellPicker(c) {
+  const results = h('ul', { style: 'max-height:260px;overflow:auto;padding-left:18px' });
+  const known = new Set(c.spells.map((e) => e.srd).filter(Boolean));
+  const form = h('form', { onsubmit: (e) => e.preventDefault() },
+    field('Search', h('input', { name: 'q', type: 'search', placeholder: 'fire, heal, charm…', oninput: () => draw() })),
+    field('Class list', h('select', { name: 'cls', onchange: () => draw() }, h('option', { value: c.className }, c.className), h('option', { value: '' }, 'all classes'),
+      Object.keys(RULES.classes).filter((k) => k !== c.className).map((k) => h('option', { value: k }, k)))),
+    field('Level', h('select', { name: 'lvl', onchange: () => draw() }, h('option', { value: '' }, 'any'), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((l) => h('option', { value: l }, l ? `level ${l}` : 'cantrip')))));
+  const add = (name) => run(async () => {
+    try { await reloadCharacter(await api('PATCH', `/api/characters/${c.id}`, { spells: [...c.spells, { srd: name }] })); }
+    catch (e) { // over the limit: keep it in the list, unprepared
+      if (e.status !== 400) throw e;
+      await reloadCharacter(await api('PATCH', `/api/characters/${c.id}`, { spells: [...c.spells, { srd: name, prepared: false }] }));
+      state.lastNote = `${name} added but not prepared: ${e.message}`;
+      showRolls([]);
+    }
+  });
+  function draw() {
+    if (!SPELL_CATALOG) return;
+    const f = Object.fromEntries(new FormData(form));
+    const q = f.q.trim().toLowerCase();
+    const hits = SPELL_CATALOG.filter((sp) => (!f.cls || sp.classes.includes(f.cls)) && (f.lvl === '' || sp.level === +f.lvl)
+      && (!q || sp.name.toLowerCase().includes(q) || sp.description.toLowerCase().includes(q))).slice(0, 60);
+    results.replaceChildren(...(hits.length ? hits.map((sp) => h('li', {}, `${sp.name} — ${sp.level ? `level ${sp.level}` : 'cantrip'} ${sp.school.toLowerCase()} `,
+      known.has(sp.name) ? h('span', { class: 'muted' }, '(on sheet)') : h('button', { class: 'link', onclick: () => add(sp.name) }, 'add'))) : [h('li', { class: 'muted' }, 'No matches.')]));
+  }
+  return h('details', { ontoggle: (e) => e.target.open && run(async () => { await loadSpells(); draw(); }) }, h('summary', {}, 'Add from the SRD spell list'), form, results);
 }
 
 function renderSheet() {
@@ -346,7 +389,7 @@ function renderSheet() {
       h('div', {}, h('h2', {}, c.name), h('p', { class: 'muted', style: 'margin:0' }, `Level ${v.level} ${c.species} ${c.className} · ${c.background} · ${s.size}`))),
     progress, rollControls()));
 
-  $app.append(h('div', { class: 'row' }, attacksSection(c, s), spellsSection(c, s)));
+  $app.append(h('div', { class: 'row' }, attacksSection(c, s), spellsSection(v)));
   $app.append(h('div', { class: 'row' },
     h('section', {},
       h('h3', {}, `Hit points ${c.hp.current} / ${s.maxHp}${c.hp.temp ? ` (+${c.hp.temp} temp)` : ''}`),

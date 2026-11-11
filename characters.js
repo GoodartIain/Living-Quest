@@ -42,6 +42,7 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
       pendingLevels: camp.advancement.mode === 'xp' ? pendingOf(c) : 0,
       advancement: { ...camp.advancement, levelUp: levelUpRule(camp) },
       sheet: rules.derive(c, level),
+      spells: spellPreviews(c, rules.derive(c, level).spellcasting),
       history: ledger(c).map((a) => ({ ...a, by: find('users', a.by).name })),
     };
   }
@@ -127,12 +128,36 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
   function validSpells(list) {
     if (!Array.isArray(list) || list.length > 300) fail(400, 'spells must be a list of up to 300');
     return list.map((sp) => {
+      const sid = typeof sp.id === 'string' && sp.id.length <= 40 ? sp.id : id();
+      const prepared = sp.prepared !== false;
+      if (sp.srd !== undefined) return { id: sid, srd: rules.SPELLS.has(sp.srd) ? sp.srd : fail(400, `${sp.srd} is not an SRD spell`), prepared };
       const attack = oneOf(sp.attack ?? 'none', ['none', 'attack', 'save'], 'spell attack');
       const damage = sp.damage ? str(sp.damage, 'spell damage', 60) : '';
       if (damage) dice.parse(damage); // reject formulas that could not be rolled later
-      return { id: typeof sp.id === 'string' && sp.id.length <= 40 ? sp.id : id(), name: str(sp.name, 'spell name', 80),
+      return { id: sid, name: str(sp.name, 'spell name', 80),
         level: num(sp.level ?? 0, 'spell level', 0, 9, true), attack, saveAbility: attack === 'save' ? oneOf(sp.saveAbility, rules.ABILITIES, 'save ability') : null,
-        damage, damageType: optional(sp.damageType, 'damage type', 30), prepared: sp.prepared !== false, notes: optional(sp.notes, 'spell notes', 2000) };
+        damage, damageType: optional(sp.damageType, 'damage type', 30), prepared, notes: optional(sp.notes, 'spell notes', 2000) };
+    });
+  }
+  // Prepared cantrips and levelled spells must fit the class table (plus Magic Initiate).
+  function checkSpellLimits(c, spells) {
+    const sc = rules.derive({ ...c, spells }, levelOf(c)).spellcasting;
+    const ready = spells.map(rules.resolveSpell).filter((sp) => sp.prepared);
+    if (!sc) { if (ready.length) fail(409, `${c.className}s cannot prepare spells`); return; }
+    const cantrips = ready.filter((sp) => sp.level === 0).length;
+    const levelled = ready.length - cantrips;
+    if (cantrips > sc.cantripsMax) fail(400, `${c.name} knows ${sc.cantripsMax} cantrip(s) at this level, not ${cantrips}`);
+    if (levelled > sc.preparedMax) fail(400, `${c.name} can prepare ${sc.preparedMax} spell(s) at this level, not ${levelled}; unmark some as prepared`);
+  }
+  // Damage/healing formulas for every slot level the character could use, so the sheet can show them.
+  function spellPreviews(c, sc) {
+    const level = levelOf(c);
+    const mod = sc ? rules.derive(c, level).modifiers[sc.ability] : 0;
+    return c.spells.map((e) => {
+      const sp = rules.resolveSpell(e);
+      const slots = !sc || sp.level === 0 ? [sp.level] : sc.pact ? [sc.pact.level] : sc.slots.map((n, i) => i + 1).filter((l) => l >= sp.level);
+      const at = Object.fromEntries((slots.length ? slots : [sp.level]).map((l) => [l, rules.spellFormulas(sp, { slotLevel: l, characterLevel: level, mod })]));
+      return { ...sp, at };
     });
   }
 
@@ -142,6 +167,7 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
 
   const routes = {
     'GET /api/ruleset': () => rules.options,
+    'GET /api/ruleset/spells': () => rules.DATA.spells,
 
     'POST /api/campaigns/:id/characters': (u, b, p) => {
       const camp = find('campaigns', p.id);
@@ -207,7 +233,7 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
         for (const m of b.masteries) if (!rules.weaponProficient(c, m)) fail(400, `${m}: choose SRD weapons ${c.name} is proficient with`);
         ch.masteries = [...new Set(b.masteries)];
       }
-      if (b.spells !== undefined) ch.spells = validSpells(b.spells);
+      if (b.spells !== undefined) { ch.spells = validSpells(b.spells); checkSpellLimits(c, ch.spells); }
       if (b.currency !== undefined) ch.currency = Object.fromEntries(COINS.map((k) => [k, num(b.currency[k] ?? 0, k, 0, 1e9, true)]));
       if (!Object.keys(ch).length) fail(400, 'nothing to change');
       Object.assign(c, ch);
@@ -304,7 +330,9 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
       const role = need(u, c.worldId, 'player');
       const s = rules.derive(c, levelOf(c));
       const casting = s.spellcasting || fail(409, `${c.className}s do not cast spells`);
-      const spell = c.spells.find((x) => x.id === b.spellId) || fail(404, 'spell not on this character');
+      const entry = c.spells.find((x) => x.id === b.spellId) || fail(404, 'spell not on this character');
+      const spell = rules.resolveSpell(entry);
+      if (!spell.prepared) fail(409, `${spell.name} is not prepared`);
       if (b.sceneId != null) { // checked before any slot is spent, so a refused cast changes nothing
         const sc = find('scenes', b.sceneId);
         if (sc.worldId !== c.worldId || !canSeeScene(u, sc)) fail(404, 'scene not found');
@@ -313,7 +341,12 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
       if (visibility === 'gm' && role !== 'gm') fail(403, 'only the GM can roll behind the screen');
       let slotLevel = 0;
       const used = { ...c.slotsUsed };
-      if (spell.level > 0) {
+      if (spell.level > 0 && b.free === true) { // Magic Initiate: the level 1 spell once per long rest without a slot
+        if (!casting.freeCast || spell.level !== 1) fail(409, 'only a Magic Initiate level 1 spell can be cast without a slot');
+        if (used.free) fail(409, 'the free Magic Initiate casting returns on a long rest');
+        used.free = 1;
+        slotLevel = 1;
+      } else if (spell.level > 0) {
         if (casting.pact) { // Pact Magic: every slot is the same level
           if (spell.level > casting.pact.level) fail(409, `pact slots are level ${casting.pact.level}`);
           if ((used.pact || 0) >= casting.pact.count) fail(409, 'no pact slots left; they return on a short rest');
@@ -332,11 +365,14 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
       const common = { visibility, sceneId: b.sceneId, characterId: c.id };
       const rolls = [];
       if (spell.attack === 'attack') rolls.push(makeRoll(u, c.worldId, { ...common, mode, formula: `1d20${casting.attackBonus < 0 ? '-' : '+'}${Math.abs(casting.attackBonus)}`, label: `${c.name} casts ${spell.name}${at}: spell attack` }));
-      if (spell.damage) {
-        const save = spell.attack === 'save' ? `, DC ${casting.saveDC} ${spell.saveAbility.toUpperCase()} save` : '';
-        rolls.push(makeRoll(u, c.worldId, { ...common, formula: b.crit === true ? doubleDice(spell.damage) : spell.damage,
-          label: `${c.name} casts ${spell.name}${at}: damage${spell.damageType ? ` (${spell.damageType})` : ''}${save}${b.crit === true ? ', critical' : ''}` }));
+      const f = rules.spellFormulas(spell, { slotLevel: slotLevel || spell.level, characterLevel: levelOf(c), mod: s.modifiers[casting.ability] });
+      const save = spell.attack === 'save' ? `, DC ${casting.saveDC} ${spell.saveAbility.toUpperCase()} save` : '';
+      if (f.damage) {
+        const type = spell.damage.type ? ` (${spell.damage.type.toLowerCase()})` : '';
+        rolls.push(makeRoll(u, c.worldId, { ...common, formula: b.crit === true ? doubleDice(f.damage) : f.damage,
+          label: `${c.name} casts ${spell.name}${at}: damage${type}${save}${b.crit === true ? ', critical' : ''}` }));
       }
+      if (f.heal) rolls.push(makeRoll(u, c.worldId, { ...common, formula: f.heal, label: `${c.name} casts ${spell.name}${at}: healing` }));
       record(u.id, 'spell.cast', { characterId: c.id, spell: spell.name, spellLevel: spell.level, slotLevel });
       return { ...sheet(c), rolls };
     },

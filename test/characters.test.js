@@ -308,3 +308,61 @@ test('armour, AC, weapon masteries and class attack features', async (t) => {
   const club = custom.body.sheet.attacks.find((a) => a.name === 'Bone Club');
   assert.deepEqual([club.toHit, club.damage], [6, '1d6+4']);
 });
+
+test('SRD spell catalogue: scaling, healing, prepared limits, Magic Initiate', async (t) => {
+  const { call, ok, close } = await boot();
+  t.after(close);
+  const gm = (await ok('POST', '/api/users', { name: 'Gm' })).token;
+  const world = await ok('POST', '/api/worlds', { name: 'W', advancement: 'milestone' }, gm);
+  const camp = await ok('POST', `/api/worlds/${world.id}/campaigns`, { name: 'C' }, gm);
+  assert.equal((await ok('GET', '/api/ruleset/spells', null, gm)).length, 339);
+  const make = async (b) => (await ok('POST', `/api/campaigns/${camp.id}/characters`, b, gm)).character;
+  const wiz = await make({ name: 'Ilse', species: 'Gnome', className: 'Wizard', background: 'Sage', abilityMethod: 'standard',
+    baseScores: { str: 8, dex: 14, con: 13, int: 15, wis: 12, cha: 10 }, backgroundBonus: { int: 2, con: 1 }, classSkills: ['Investigation', 'Medicine'] }); // INT 17
+  const patch = (c, b) => call('PATCH', `/api/characters/${c.id}`, b, gm);
+  const cast = (c, b) => call('POST', `/api/characters/${c.id}/cast`, b, gm);
+  const level = async (c, n) => { for (let i = 0; i < n; i++) await ok('POST', `/api/campaigns/${camp.id}/milestone`, { reason: 'up', characterIds: [c.id] }, gm); };
+
+  assert.equal((await patch(wiz, { spells: [{ srd: 'Lightsaber' }] })).status, 400);
+  // Wizard 1: 3 cantrips (+2 from Magic Initiate via Sage = 5), 4 prepared (+1 = 5).
+  const six = ['Fire Bolt', 'Light', 'Mage Hand', 'Prestidigitation', 'Minor Illusion', 'Ray of Frost'].map((n) => ({ srd: n }));
+  assert.match((await patch(wiz, { spells: six })).body.error, /knows 5 cantrip/);
+  const many = ['Magic Missile', 'Shield', 'Sleep', 'Burning Hands', 'Thunderwave', 'Detect Magic'].map((n) => ({ srd: n }));
+  assert.match((await patch(wiz, { spells: many })).body.error, /prepare 5 spell/);
+  const sheet = (await patch(wiz, { spells: [{ srd: 'Fire Bolt' }, { srd: 'Burning Hands' }, { srd: 'Fireball', prepared: false }, ...many.slice(0, 4)] })).body;
+  assert.deepEqual([sheet.sheet.spellcasting.cantripsMax, sheet.sheet.spellcasting.preparedMax], [5, 5]);
+  const id = (n) => sheet.character.spells.find((x) => x.srd === n).id;
+  assert.equal((await cast(wiz, { spellId: id('Fireball') })).status, 409, 'unprepared');
+  assert.deepEqual(sheet.spells.find((x) => x.name === 'Burning Hands').at, { 1: { damage: '3d6' } });
+
+  await level(wiz, 4); // level 5: Fire Bolt 2d10, level 3 slots
+  await ok('PATCH', `/api/characters/${wiz.id}`, { spells: [{ srd: 'Fire Bolt' }, { srd: 'Burning Hands' }, { srd: 'Fireball' }] }, gm);
+  const s5 = await ok('GET', `/api/characters/${wiz.id}`, null, gm);
+  const fid = (n) => s5.character.spells.find((x) => x.srd === n).id;
+  const bolt = (await cast(wiz, { spellId: fid('Fire Bolt') })).body.rolls;
+  assert.deepEqual(bolt.map((r) => r.formula), ['1d20+6', '2d10'], 'INT +3, proficiency +3; cantrip upgrade at 5');
+  const fb = (await cast(wiz, { spellId: fid('Fireball'), slotLevel: 3 })).body.rolls;
+  assert.deepEqual([fb[0].formula, fb[0].label], ['8d6', 'Ilse casts Fireball: damage (fire), DC 14 DEX save']);
+  assert.equal((await cast(wiz, { spellId: fid('Burning Hands'), slotLevel: 2 })).body.rolls[0].formula, '4d6');
+  assert.deepEqual(s5.spells.find((x) => x.name === 'Fireball').at, { 3: { damage: '8d6' } });
+
+  // Healing with the casting modifier, upcast.
+  const cleric = await make({ name: 'Ada', species: 'Human', className: 'Cleric', background: 'Acolyte', abilityMethod: 'standard',
+    baseScores: { str: 13, dex: 10, con: 14, int: 8, wis: 15, cha: 12 }, backgroundBonus: { wis: 2, cha: 1 }, classSkills: ['History', 'Medicine'], speciesSkills: ['Perception'] }); // WIS 17
+  await level(cleric, 2);
+  const cs = (await patch(cleric, { spells: [{ srd: 'Cure Wounds' }] })).body;
+  assert.equal((await cast(cleric, { spellId: cs.character.spells[0].id, slotLevel: 2 })).body.rolls[0].formula, '4d8+3');
+
+  // Magic Initiate gives a Fighter (Sage) two cantrips and one free level 1 casting per long rest.
+  const ftr = await make({ ...fighter, name: 'Brann', background: 'Sage', backgroundBonus: { con: 2, int: 1 }, classSkills: ['Perception', 'Survival'] });
+  const fs = (await patch(ftr, { spells: [{ srd: 'Fire Bolt' }, { srd: 'Light' }, { srd: 'Magic Missile' }] })).body;
+  assert.deepEqual([fs.sheet.spellcasting.ability, fs.sheet.spellcasting.cantripsMax, fs.sheet.spellcasting.preparedMax], ['int', 2, 1]);
+  const mm = fs.character.spells.find((x) => x.srd === 'Magic Missile').id;
+  assert.equal((await cast(ftr, { spellId: mm })).status, 409, 'no slots');
+  await ok('POST', `/api/characters/${ftr.id}/cast`, { spellId: mm, free: true }, gm);
+  assert.equal((await cast(ftr, { spellId: mm, free: true })).status, 409, 'once per long rest');
+  await ok('POST', `/api/characters/${ftr.id}/rest`, { kind: 'long' }, gm);
+  await ok('POST', `/api/characters/${ftr.id}/cast`, { spellId: mm, free: true }, gm);
+  const soldier = await make({ ...fighter, name: 'Plain' }); // Soldier: no Magic Initiate
+  assert.equal((await patch(soldier, { spells: [{ srd: 'Light' }] })).status, 409);
+});
