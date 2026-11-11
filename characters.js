@@ -12,6 +12,68 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
   const { str, oneOf, num, safeUrl, bool } = check;
   const optional = (v, name, max) => (v === undefined ? '' : typeof v === 'string' && v.length <= max ? v : fail(400, `${name} must be text up to ${max} chars`));
 
+  // ---- Homebrew: GM-defined species, backgrounds and classes for one world, fed to the ruleset as lookups.
+  const ABIL = rules.ABILITIES;
+  const TEMPLATE = { full: 'Cleric', half: 'Paladin', pact: 'Warlock' }; // cantrips/prepared columns borrowed for homebrew casters
+  function buildHomebrew(worldId) {
+    const rows = db.homebrew.filter((h) => h.worldId === worldId);
+    const out = { species: {}, classes: {}, tables: {}, backgrounds: {} };
+    for (const h of rows) {
+      if (h.kind === 'species') out.species[h.name] = h.data;
+      if (h.kind === 'background') out.backgrounds[h.name] = h.data;
+      if (h.kind === 'class') {
+        const d = h.data;
+        out.classes[h.name] = { hitDie: d.hitDie, saves: d.saves, skills: d.skills, weapons: d.weapons, armor: d.armor,
+          caster: d.caster === 'none' ? undefined : d.caster, castingAbility: d.castingAbility || undefined, multiclassGains: { armor: d.armor.filter((a) => a !== 'heavy'), martial: d.weapons === 'martial' } };
+        const tpl = d.caster !== 'none' && rules.DATA.classes[TEMPLATE[d.caster]];
+        out.tables[h.name] = {
+          levels: Array.from({ length: 20 }, (_, i) => ({ level: i + 1,
+            features: [...d.features.filter((f) => f.level === i + 1).map((f) => f.name), ...([4, 8, 12, 16].includes(i + 1) ? ['Ability Score Improvement'] : []), ...(i + 1 === 19 ? ['Epic Boon'] : [])],
+            cantrips: tpl ? tpl.levels[i].cantrips : 0, prepared: tpl ? tpl.levels[i].prepared : 0 })),
+          features: d.features, subclass: null, startingEquipment: [],
+          multiclassing: { prerequisites: [{ ability: d.primaryAbility, minimum: 13 }], prerequisiteOptions: [] },
+        };
+      }
+    }
+    return out;
+  }
+  rules.setHomebrew(buildHomebrew);
+  function validHomebrew(worldId, kind, name, data) {
+    if (typeof data !== 'object' || !data) fail(400, 'data must be an object');
+    const taken = rules.speciesOf({ worldId }, name) || rules.classOf({ worldId }, name) || rules.backgroundOf({ worldId }, name);
+    if (taken) fail(409, `${name} already exists in this world's rules`);
+    const skillList = (v, label, max) => {
+      if (!Array.isArray(v) || v.length > max || new Set(v).size !== v.length || v.some((x) => !rules.SKILLS[x])) fail(400, `${label} must be distinct skills`);
+      return v;
+    };
+    const traitList = (v) => (Array.isArray(v) && v.length <= 12 ? v.map((x) => str(x, 'trait', 60)) : fail(400, 'traits must be a list of up to 12 names'));
+    if (kind === 'species') {
+      return { size: oneOf(data.size, ['Small', 'Medium', 'Medium or Small'], 'size'), speed: num(data.speed, 'speed', 20, 60, true), traits: traitList(data.traits ?? []),
+        ...(data.hpPerLevel && { hpPerLevel: num(data.hpPerLevel, 'hpPerLevel', 0, 2, true) }),
+        ...(data.skillChoices && { skills: { count: num(data.skillChoices, 'skillChoices', 1, 2, true), from: Object.keys(rules.SKILLS) } }) };
+    }
+    if (kind === 'background') {
+      if (!Array.isArray(data.abilities) || data.abilities.length !== 3 || new Set(data.abilities).size !== 3 || data.abilities.some((a) => !ABIL.includes(a))) fail(400, 'abilities: three different abilities');
+      const skills = skillList(data.skills, 'skills', 2);
+      if (skills.length !== 2) fail(400, 'skills: exactly two');
+      return { abilities: data.abilities, skills, feat: oneOf(data.feat, ['Alert', 'Savage Attacker', 'Magic Initiate (Cleric)', 'Magic Initiate (Druid)', 'Magic Initiate (Wizard)'], 'origin feat'),
+        tool: optional(data.tool, 'tool', 60) };
+    }
+    if (kind === 'class') {
+      const caster = oneOf(data.caster ?? 'none', ['none', 'full', 'half', 'pact'], 'caster');
+      if (!Array.isArray(data.saves) || data.saves.length !== 2 || new Set(data.saves).size !== 2 || data.saves.some((a) => !ABIL.includes(a))) fail(400, 'saves: two different abilities');
+      if (!Array.isArray(data.armor) || data.armor.some((a) => !['light', 'medium', 'heavy', 'shield'].includes(a))) fail(400, 'armor: light, medium, heavy, shield');
+      if (!Array.isArray(data.features) || data.features.length > 60) fail(400, 'features: up to 60');
+      return { hitDie: oneOf(data.hitDie, [6, 8, 10, 12], 'hitDie'), saves: data.saves, primaryAbility: oneOf(data.primaryAbility, ABIL, 'primaryAbility'),
+        skills: { count: num(data.skillCount, 'skillCount', 1, 4, true), from: skillList(data.skillOptions, 'skillOptions', 18) },
+        weapons: oneOf(data.weapons ?? 'simple', ['simple', 'martial'], 'weapons'), armor: [...new Set(data.armor)], caster,
+        castingAbility: caster === 'none' ? null : oneOf(data.castingAbility, ['int', 'wis', 'cha'], 'castingAbility'),
+        features: data.features.map((f) => ({ level: num(f.level, 'feature level', 1, 20, true), name: str(f.name, 'feature name', 80), description: optional(f.description, 'feature description', 4000) })) };
+    }
+    fail(400, 'kind must be species, background or class');
+  }
+  const inUse = (h) => db.characters.some((c) => c.worldId === h.worldId && (c.species === h.name || c.background === h.name || c.className === h.name || Object.values(c.multiclass || {}).includes(h.name)));
+
   const ledger = (c) => db.advancements.filter((a) => a.characterId === c.id);
   const levelOf = (c) => Math.min(rules.MAX_LEVEL, 1 + ledger(c).filter((a) => a.kind === 'level').length);
   const xpOf = (c) => ledger(c).filter((a) => a.kind === 'xp').reduce((n, a) => n + a.amount, 0);
@@ -203,13 +265,13 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
         if (!db.memberships.some((m) => m.userId === b.ownerId && m.campaignId === camp.id && m.role === 'player')) fail(400, 'owner must be a player in this campaign');
         ownerId = b.ownerId;
       }
-      const built = rules.create(b);
+      const built = rules.create(b, { worldId: camp.worldId });
       const c = { id: id(), worldId: camp.worldId, campaignId: camp.id, ownerId, ruleset: rules.id,
         name: str(b.name, 'name', 80), portraitUrl: b.portraitUrl ? safeUrl(b.portraitUrl) : '',
         personality: optional(b.personality, 'personality', 4000), backstory: optional(b.backstory, 'backstory', 20000),
         ...built, hp: { current: 0, temp: 0 }, conditions: [], inventory: [], currency: { cp: 0, sp: 0, ep: 0, gp: 0, pp: 0 },
         weapons: [], spells: [], slotsUsed: {}, armor: null, shield: false, masteries: [], raging: false,
-        deathSaves: { successes: 0, failures: 0 }, hitDiceUsed: 0, journal: [], choices: [], subclass: null };
+        deathSaves: { successes: 0, failures: 0 }, hitDiceUsed: 0, journal: [], choices: [], subclass: null, multiclass: {} };
       if (b.classEquipment !== undefined || b.backgroundEquipment !== undefined) { // the A/B/C packages from the SRD
         const eq = rules.startingEquipment(c, b.classEquipment ?? null, b.backgroundEquipment ?? null);
         Object.assign(c, { inventory: validInventory(eq.inventory), weapons: validWeapons(eq.weapons), armor: eq.armor, shield: eq.shield });
@@ -258,7 +320,7 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
       if (b.masteries !== undefined) {
         const allowed = rules.masteryCount(c, levelOf(c));
         if (!Array.isArray(b.masteries) || b.masteries.length > allowed) fail(400, `${c.className} level ${levelOf(c)} may master ${allowed} weapon kind(s)`);
-        for (const m of b.masteries) if (!rules.weaponProficient(c, m)) fail(400, `${m}: choose SRD weapons ${c.name} is proficient with`);
+        for (const m of b.masteries) if (!rules.weaponProficient(c, m, levelOf(c))) fail(400, `${m}: choose SRD weapons ${c.name} is proficient with`);
         ch.masteries = [...new Set(b.masteries)];
       }
       if (b.spells !== undefined) { ch.spells = validSpells(b.spells); checkSpellLimits(c, ch.spells); }
@@ -434,7 +496,10 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
         if (spend) {
           const s = rules.derive(c, levelOf(c));
           const con = s.modifiers.con;
-          const r = makeRoll(u, c.worldId, { formula: `${spend}${s.hitDie}${con ? `${con > 0 ? '+' : '-'}${Math.abs(con * spend)}` : ''}`, label: `${c.name}: short rest, ${spend} Hit Point ${spend === 1 ? 'Die' : 'Dice'}`, characterId: c.id });
+          // Spend the largest unspent dice first (multiclass characters have dice of several sizes).
+          const dice = s.hitDice.slice(c.hitDiceUsed, c.hitDiceUsed + spend).reduce((m, d) => ({ ...m, [d]: (m[d] || 0) + 1 }), {});
+          const formula = Object.keys(dice).sort((a, b2) => b2 - a).map((d) => `${dice[d]}d${d}`).join('+');
+          const r = makeRoll(u, c.worldId, { formula: `${formula}${con ? `${con > 0 ? '+' : '-'}${Math.abs(con * spend)}` : ''}`, label: `${c.name}: short rest, ${spend} Hit Point ${spend === 1 ? 'Die' : 'Dice'}`, characterId: c.id });
           rolls.push(r);
           c.hp = { ...c.hp, current: Math.min(maxHpOf(c), c.hp.current + Math.max(0, r.total)) };
           c.hitDiceUsed += spend;
@@ -482,6 +547,47 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
       record(u.id, 'character.choice', { characterId: c.id, ...rec });
       sync(c);
       return sheet(c);
+    },
+
+    // Put the character's newest level into another class (or back into the primary class).
+    'POST /api/characters/:id/multiclass': (u, b, p) => {
+      const c = find('characters', p.id);
+      owner(u, c);
+      const before = maxHpOf(c);
+      const patch = rules.assignLevel(c, levelOf(c), b);
+      Object.assign(c, patch);
+      c.hp.current = Math.max(0, c.hp.current + maxHpOf(c) - before);
+      c.hitDiceUsed = Math.min(c.hitDiceUsed, levelOf(c));
+      record(u.id, 'character.multiclass', { characterId: c.id, level: levelOf(c), className: b.className });
+      sync(c);
+      return sheet(c);
+    },
+
+    'GET /api/worlds/:id/homebrew': (u, _b, p) => { need(u, p.id, 'spectator'); return db.homebrew.filter((h) => h.worldId === p.id); },
+    'POST /api/worlds/:id/homebrew': (u, b, p) => {
+      need(u, p.id, 'gm');
+      const kind = oneOf(b.kind, ['species', 'background', 'class'], 'kind');
+      const name = str(b.name, 'name', 60);
+      const h = { id: id(), worldId: p.id, kind, name, data: validHomebrew(p.id, kind, name, b.data) };
+      db.homebrew.push(h);
+      record(u.id, 'homebrew.created', { id: h.id, kind, name });
+      return h;
+    },
+    'DELETE /api/homebrew/:id': (u, _b, p) => {
+      const h = find('homebrew', p.id);
+      need(u, h.worldId, 'gm');
+      if (inUse(h)) fail(409, `${h.name} is used by a character`);
+      db.homebrew.splice(db.homebrew.indexOf(h), 1);
+      record(u.id, 'homebrew.deleted', h);
+      return { ok: true };
+    },
+    // The creation wizard's options for this world: SRD plus its homebrew.
+    'GET /api/worlds/:id/ruleset': (u, _b, p) => {
+      need(u, p.id, 'spectator');
+      const extra = buildHomebrew(p.id);
+      const o = rules.options;
+      return { ...o, species: { ...o.species, ...extra.species }, classes: { ...o.classes, ...extra.classes }, backgrounds: { ...o.backgrounds, ...extra.backgrounds },
+        homebrew: db.homebrew.filter((h) => h.worldId === p.id).map((h) => ({ id: h.id, kind: h.kind, name: h.name })) };
     },
 
     'POST /api/characters/:id/journal': (u, b, p) => {

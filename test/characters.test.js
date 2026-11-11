@@ -478,7 +478,7 @@ test('level-up choices, class features and starting equipment', async (t) => {
 
   const created = (await make({ ...fighter, name: 'Brann' })).body; // STR 17, CON 14
   const c = created.character;
-  assert.deepEqual(created.pendingChoices, [{ level: 1, kind: 'fightingStyle' }]);
+  assert.deepEqual(created.pendingChoices, [{ className: 'Fighter', level: 1, kind: 'fightingStyle' }]);
   assert.ok(created.features.some((f) => f.name === 'Second Wind' && f.description.length > 50));
   const choose = (b) => call('POST', `/api/characters/${c.id}/choices`, b, gm);
   const up = async (n) => { for (let i = 0; i < n; i++) await ok('POST', `/api/campaigns/${camp.id}/milestone`, { reason: 'up', characterIds: [c.id] }, gm); };
@@ -504,7 +504,7 @@ test('level-up choices, class features and starting equipment', async (t) => {
   s = (await choose({ level: 6, kind: 'feat', feat: 'Magic Initiate', list: 'Wizard' })).body;
   assert.equal(s.sheet.spellcasting.ability, 'int');
   await up(1); // level 7: Champion's Additional Fighting Style
-  assert.deepEqual((await ok('GET', `/api/characters/${c.id}`, null, gm)).pendingChoices, [{ level: 7, kind: 'fightingStyle' }]);
+  assert.deepEqual((await ok('GET', `/api/characters/${c.id}`, null, gm)).pendingChoices, [{ className: 'Fighter', level: 7, kind: 'fightingStyle' }]);
   s = (await choose({ level: 7, kind: 'fightingStyle', feat: 'Defense' })).body;
   await up(1); // level 8
   s = (await choose({ level: 8, kind: 'feat', feat: 'Ability Score Improvement', increases: { str: 2 } })).body;
@@ -518,4 +518,91 @@ test('level-up choices, class features and starting equipment', async (t) => {
   s = (await choose({ level: 19, kind: 'boon', feat: 'Boon of Combat Prowess', increases: { str: 1 } })).body;
   assert.equal(s.character.abilities.str, 21, 'epic boons go to 30');
   assert.deepEqual(s.character.choices.map((x) => x.kind), ['fightingStyle', 'subclass', 'feat', 'feat', 'fightingStyle', 'feat', 'feat', 'boon']);
+});
+
+test('multiclassing: prerequisites, HP, hit dice, combined slots, per-class choices', async (t) => {
+  // Rules level: combined spell slots and limits.
+  const base = { ...rules.create({ ...fighter, className: 'Wizard', classSkills: ['Arcana', 'History'] }), weapons: [] };
+  const mc = (className, multiclass, level) => rules.derive({ ...base, className, multiclass }, level);
+  const wc = mc('Wizard', { 4: 'Cleric', 5: 'Cleric' }, 5);
+  assert.deepEqual(wc.classes, { Wizard: 3, Cleric: 2 });
+  assert.deepEqual(wc.spellcasting.slots, [4, 3, 2], 'caster level 3 + 2 = 5');
+  assert.equal(wc.spellcasting.cantripsMax, 3 + 3);
+  assert.deepEqual(mc('Paladin', { 3: 'Wizard' }, 3).spellcasting.slots, [3], 'Paladin 2 (rounds up to 1) + Wizard 1 = 2');
+  const pw = mc('Wizard', { 2: 'Warlock', 3: 'Warlock' }, 3).spellcasting;
+  assert.deepEqual([pw.slots, pw.pact], [[2], { count: 2, level: 1 }], 'pact magic stays separate');
+
+  const { call, ok, close } = await boot();
+  t.after(close);
+  const gm = (await ok('POST', '/api/users', { name: 'Gm' })).token;
+  const world = await ok('POST', '/api/worlds', { name: 'W', advancement: 'milestone' }, gm);
+  const camp = await ok('POST', `/api/worlds/${world.id}/campaigns`, { name: 'C' }, gm);
+  const c = (await ok('POST', `/api/campaigns/${camp.id}/characters`, { ...fighter, name: 'Brann' }, gm)).character; // STR 17 DEX 14 INT 8
+  const up = () => ok('POST', `/api/campaigns/${camp.id}/milestone`, { reason: 'up', characterIds: [c.id] }, gm);
+  const multi = (b) => call('POST', `/api/characters/${c.id}/multiclass`, b, gm);
+  assert.equal((await multi({ className: 'Rogue', skill: 'Stealth' })).status, 400, 'level 1');
+  await up();
+  assert.match((await multi({ className: 'Wizard' })).body.error, /Wizard needs 13/);
+  assert.match((await multi({ className: 'Rogue' })).body.error, /one skill/);
+  assert.equal((await multi({ className: 'Rogue', skill: 'Athletics' })).status, 400, 'already proficient');
+  let s = (await multi({ className: 'Rogue', skill: 'Stealth' })).body;
+  assert.deepEqual(s.sheet.classes, { Fighter: 1, Rogue: 1 });
+  assert.equal(s.sheet.maxHp, 13 + 5 + 2 + 1, 'd10 at level 1, then the d8 average + CON + Dwarven Toughness');
+  assert.equal(s.character.hp.current, s.sheet.maxHp);
+  assert.equal(s.sheet.hitDie, '1d10 + 1d8');
+  assert.equal(s.sheet.sneakAttack, '1d6');
+  assert.ok(s.character.skills.includes('Stealth'));
+  assert.equal(s.sheet.masteries.allowed, 3, 'the higher of Fighter (3) and Rogue (2)');
+  await up(); // level 3 → Fighter 2 by default
+  await multi({ className: 'Rogue' }); // now Rogue 2
+  await up();
+  s = (await multi({ className: 'Rogue' })).body; // Rogue 3: subclass due
+  assert.deepEqual(s.pendingChoices.map((x) => `${x.className} ${x.level} ${x.kind}`), ['Fighter 1 fightingStyle', 'Rogue 3 subclass']);
+  s = (await ok('POST', `/api/characters/${c.id}/choices`, { className: 'Rogue', level: 3, kind: 'subclass', subclass: 'Thief' }, gm));
+  assert.ok(s.features.some((f) => f.name === 'Fast Hands' && f.className === 'Rogue'));
+  assert.match((await multi({ className: 'Fighter' })).body.error, /choice was already made for Rogue level 3/);
+  assert.equal(s.sheet.sneakAttack, '2d6');
+  // Short rests spend the largest dice first.
+  await ok('POST', `/api/characters/${c.id}/hp`, { damage: 5 }, gm);
+  const rest = await ok('POST', `/api/characters/${c.id}/rest`, { kind: 'short', hitDice: 2 }, gm);
+  assert.equal(rest.rolls[0].formula, '1d10+1d8+4');
+});
+
+test('GM homebrew: species, backgrounds and classes for one world', async (t) => {
+  const { call, ok, close } = await boot();
+  t.after(close);
+  const gm = (await ok('POST', '/api/users', { name: 'Gm' })).token;
+  const pat = (await ok('POST', '/api/users', { name: 'Pat' })).token;
+  const world = await ok('POST', '/api/worlds', { name: 'W', advancement: 'milestone' }, gm);
+  const other = await ok('POST', '/api/worlds', { name: 'Other', advancement: 'milestone' }, gm);
+  const camp = await ok('POST', `/api/worlds/${world.id}/campaigns`, { name: 'C' }, gm);
+  const otherCamp = await ok('POST', `/api/worlds/${other.id}/campaigns`, { name: 'C2' }, gm);
+  await ok('POST', `/api/invites/${(await ok('POST', `/api/campaigns/${camp.id}/invites`, {}, gm)).code}/accept`, {}, pat);
+  const brew = (b, tok = gm, w = world) => call('POST', `/api/worlds/${w.id}/homebrew`, b, tok);
+  const warden = { hitDie: 10, saves: ['str', 'wis'], primaryAbility: 'wis', skillCount: 2, skillOptions: ['Athletics', 'Nature', 'Survival', 'Perception'],
+    weapons: 'martial', armor: ['light', 'medium', 'shield'], caster: 'half', castingAbility: 'wis',
+    features: [{ level: 1, name: 'Ward', description: 'You protect an ally within 5 feet.' }, { level: 5, name: 'Extra Attack', description: 'Attack twice.' }] };
+  assert.equal((await brew({ kind: 'class', name: 'Warden', data: warden }, pat)).status, 403);
+  assert.equal((await brew({ kind: 'class', name: 'Fighter', data: warden })).status, 409, 'SRD names are taken');
+  assert.equal((await brew({ kind: 'class', name: 'Bad', data: { ...warden, hitDie: 7 } })).status, 400);
+  assert.equal((await brew({ kind: 'species', name: 'Bad', data: { size: 'Huge', speed: 30 } })).status, 400);
+  await ok('POST', `/api/worlds/${world.id}/homebrew`, { kind: 'class', name: 'Warden', data: warden }, gm);
+  const stone = await ok('POST', `/api/worlds/${world.id}/homebrew`, { kind: 'species', name: 'Stoneborn', data: { size: 'Medium', speed: 25, traits: ['Stone Skin'], hpPerLevel: 1 } }, gm);
+  await ok('POST', `/api/worlds/${world.id}/homebrew`, { kind: 'background', name: 'Ferryman', data: { abilities: ['str', 'con', 'wis'], skills: ['Athletics', 'Insight'], feat: 'Alert', tool: 'Navigator\'s Tools' } }, gm);
+  const rs = await ok('GET', `/api/worlds/${world.id}/ruleset`, null, pat);
+  assert.ok(rs.classes.Warden && rs.species.Stoneborn && rs.backgrounds.Ferryman && rs.classes.Fighter);
+  assert.equal((await ok('GET', `/api/worlds/${other.id}/ruleset`, null, gm)).classes.Warden, undefined);
+
+  const build = { name: 'Odo', species: 'Stoneborn', className: 'Warden', background: 'Ferryman', abilityMethod: 'standard',
+    baseScores: { str: 15, dex: 12, con: 13, int: 8, wis: 14, cha: 10 }, backgroundBonus: { wis: 2, str: 1 }, classSkills: ['Nature', 'Survival'] };
+  const made = await ok('POST', `/api/campaigns/${camp.id}/characters`, build, pat);
+  assert.deepEqual([made.sheet.speed, made.sheet.hitDie, made.sheet.maxHp, made.sheet.spellcasting.slots, made.sheet.initiative],
+    [25, 'd10', 10 + 1 + 1, [2], 1 + 2], 'Stoneborn speed, d10 + CON + toughness, half caster, Alert');
+  assert.ok(made.features.some((f) => f.name === 'Ward'));
+  assert.equal((await call('POST', `/api/campaigns/${otherCamp.id}/characters`, build, gm)).status, 400, 'homebrew stays in its world');
+  for (let i = 0; i < 3; i++) await ok('POST', `/api/campaigns/${camp.id}/milestone`, { reason: 'up' }, gm);
+  assert.deepEqual((await ok('GET', `/api/characters/${made.character.id}`, null, pat)).pendingChoices.map((x) => `${x.level} ${x.kind}`), ['4 feat']);
+  assert.equal((await call('DELETE', `/api/homebrew/${stone.id}`, null, gm)).status, 409, 'in use');
+  const spare = await ok('POST', `/api/worlds/${world.id}/homebrew`, { kind: 'species', name: 'Mistfolk', data: { size: 'Small', speed: 30 } }, gm);
+  await ok('DELETE', `/api/homebrew/${spare.id}`, null, gm);
 });

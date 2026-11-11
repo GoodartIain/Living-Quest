@@ -4,7 +4,12 @@
 'use strict';
 
 let RULES = null;
-const loadRules = async () => (RULES ||= await api('GET', '/api/ruleset'));
+let RULES_WORLD = null;
+// Per world: the SRD plus that world's homebrew.
+async function loadRules(force) {
+  if (force || !RULES || RULES_WORLD !== state.world.id) { RULES = await api('GET', `/api/worlds/${state.world.id}/ruleset`); RULES_WORLD = state.world.id; }
+  return RULES;
+}
 const signed = (n) => (n >= 0 ? `+${n}` : String(n));
 const ABIL = { str: 'Strength', dex: 'Dexterity', con: 'Constitution', int: 'Intelligence', wis: 'Wisdom', cha: 'Charisma' };
 
@@ -38,7 +43,8 @@ function charactersPanel() {
         gm && c.pendingLevels ? h('strong', {}, ` · ${c.pendingLevels} level-up pending`) : '')))
       : h('p', { class: 'muted' }, 'No characters yet.'),
     canCreate && h('button', { onclick: () => run(startWizard) }, 'Create a character'),
-    gm && w.campaigns.map((c) => advancementForm(c)));
+    gm && w.campaigns.map((c) => advancementForm(c)),
+    gm && homebrewEditor());
 }
 
 function advancementForm(c) {
@@ -63,6 +69,7 @@ function advancementForm(c) {
 
 async function refreshWorld() {
   state.world = await api('GET', `/api/worlds/${state.world.id}`);
+  if (state.world.role === 'gm') await loadRules(true);
   await loadCharacters();
   render();
 }
@@ -272,9 +279,9 @@ function armorEditor(c, s) {
 function masteryEditor(c, s) {
   const m = s.masteries;
   if (!m.allowed) return null;
-  const cls = RULES.classes[c.className];
-  const proficient = Object.entries(RULES.weapons).filter(([, w]) => w.category.startsWith('simple') || cls.weapons === 'martial'
-    || (cls.martialIf || []).some((p) => w.properties.some((x) => x.startsWith(p)))).map(([n]) => n);
+  const t = s.training; // includes proficiencies gained by multiclassing
+  const proficient = Object.entries(RULES.weapons).filter(([, w]) => w.category.startsWith('simple') || t.martial
+    || t.martialIf.some((p) => w.properties.some((x) => x.startsWith(p)))).map(([n]) => n);
   const save = (masteries) => run(async () => reloadCharacter(await api('PATCH', `/api/characters/${c.id}`, { masteries })));
   return h('details', {}, h('summary', {}, `Weapon mastery (${m.chosen.length}/${m.allowed})`),
     h('div', { style: 'display:flex;flex-wrap:wrap;gap:4px 12px' }, proficient.map((n) => h('label', { class: 'inline', title: RULES.masteries[RULES.mastery[n]] },
@@ -406,9 +413,10 @@ function renderSheet() {
   $app.append(h('section', {}, back,
     h('div', { style: 'display:flex;gap:16px;align-items:center;flex-wrap:wrap' },
       c.portraitUrl && h('img', { src: c.portraitUrl, alt: `Portrait of ${c.name}`, style: 'width:96px;height:96px;object-fit:cover;border-radius:8px' }),
-      h('div', {}, h('h2', {}, c.name), h('p', { class: 'muted', style: 'margin:0' }, `Level ${v.level} ${c.species} ${c.className} · ${c.background} · ${s.size}`))),
+      h('div', {}, h('h2', {}, c.name), h('p', { class: 'muted', style: 'margin:0' }, `Level ${v.level} ${c.species} ${Object.entries(s.classes).filter(([, n]) => n > 0).map(([k, n]) => (Object.keys(s.classes).length > 1 ? `${k} ${n}` : k)).join(' / ')}${c.subclass ? ` (${c.subclass})` : ''} · ${c.background} · ${s.size}`))),
     progress, rollControls()));
 
+  $app.append(multiclassPanel(v));
   if (v.pendingChoices.length) $app.append(choicesPanel(v));
   $app.append(h('div', { class: 'row' }, attacksSection(c, s), spellsSection(v)));
   $app.append(featuresSection(v));
@@ -460,6 +468,62 @@ function renderSheet() {
         field(`Award ${c.name} a level`, h('input', { name: 'reason', required: true, placeholder: 'Personal quest complete' })), h('button', {}, 'Award level')))));
 }
 
+function multiclassPanel(v) {
+  const c = v.character, s = v.sheet;
+  const newest = v.level;
+  const currentOfNewest = (c.multiclass || {})[newest] || c.className;
+  const others = Object.keys(RULES.classes).filter((k) => k !== currentOfNewest);
+  const skillSelect = h('select', { name: 'skill' }, h('option', { value: '' }, '— only if the new class grants one —'), Object.keys(RULES.skills).filter((x) => !c.skills.includes(x)).map((x) => h('option', { value: x }, x)));
+  return h('section', {}, h('h3', {}, `Classes · ${Object.entries(s.classes).filter(([, n]) => n > 0).map(([k, n]) => `${k} ${n}`).join(' / ')}`),
+    newest < 2 ? h('p', { class: 'muted' }, 'Multiclassing becomes possible from level 2.')
+      : h('form', { onsubmit: onSubmit(async (f) => reloadCharacter(await api('POST', `/api/characters/${c.id}/multiclass`, { className: f.className, skill: f.skill || undefined }))) },
+        h('p', { class: 'muted', style: 'width:100%;margin:0' }, `Level ${newest} went to ${currentOfNewest}. You can move it to another class (13 in the primary abilities of both classes) until you make a choice for it.`),
+        field('Move level to', h('select', { name: 'className' }, others.map((k) => h('option', { value: k }, k)))),
+        field('Skill gained (Bard, Ranger, Rogue)', skillSelect),
+        h('button', {}, 'Move level')));
+}
+
+function homebrewEditor() {
+  const list = (RULES && RULES.homebrew) || [];
+  const post = (body) => run(async () => { await api('POST', `/api/worlds/${state.world.id}/homebrew`, body); await refreshWorld(); });
+  const ab = (name, label) => field(label, h('select', { name }, RULES.abilities.map((a) => h('option', { value: a }, a.toUpperCase()))));
+  const skills = (name, label) => field(label, h('select', { name }, Object.keys(RULES.skills).map((x) => h('option', { value: x }, x))));
+  const csv = (v) => v.split(',').map((x) => x.trim()).filter(Boolean);
+  return h('details', { open: state.homebrewOpen || false, ontoggle: (e) => { state.homebrewOpen = e.target.open; } }, h('summary', {}, `Homebrew rules (${list.length})`),
+    list.length ? h('ul', {}, list.map((x) => h('li', {}, `${x.name} (${x.kind}) `,
+      h('button', { class: 'link', onclick: () => run(async () => { await api('DELETE', `/api/homebrew/${x.id}`); await refreshWorld(); }) }, 'delete'))))
+      : h('p', { class: 'muted' }, 'No homebrew yet. Anything added here is available to every campaign in this world.'),
+    h('h3', {}, 'New species'),
+    h('form', { onsubmit: onSubmit((f) => post({ kind: 'species', name: f.name, data: { size: f.size, speed: +f.speed, traits: csv(f.traits),
+        ...(+f.hp && { hpPerLevel: +f.hp }), ...(+f.skills && { skillChoices: +f.skills }) } })) },
+      field('Name', h('input', { name: 'name', required: true })), field('Size', h('select', { name: 'size' }, options(['Medium', 'Small', 'Medium or Small'], 'Medium'))),
+      field('Speed', h('input', { name: 'speed', type: 'number', value: 30, min: 20, max: 60, size: 3 })), field('Traits (comma-separated)', h('input', { name: 'traits' })),
+      field('Extra HP per level', h('select', { name: 'hp' }, options(['0', '1', '2'], '0'))), field('Skill choices', h('select', { name: 'skills' }, options(['0', '1', '2'], '0'))),
+      h('button', {}, 'Add species')),
+    h('h3', {}, 'New background'),
+    h('form', { onsubmit: onSubmit((f) => post({ kind: 'background', name: f.name, data: { abilities: [f.a1, f.a2, f.a3], skills: [f.s1, f.s2], feat: f.feat, tool: f.tool } })) },
+      field('Name', h('input', { name: 'name', required: true })), ab('a1', 'Ability 1'), ab('a2', 'Ability 2'), ab('a3', 'Ability 3'),
+      skills('s1', 'Skill 1'), skills('s2', 'Skill 2'),
+      field('Origin feat', h('select', { name: 'feat' }, options(['Alert', 'Savage Attacker', 'Magic Initiate (Cleric)', 'Magic Initiate (Druid)', 'Magic Initiate (Wizard)']))),
+      field('Tool', h('input', { name: 'tool' })), h('button', {}, 'Add background')),
+    h('h3', {}, 'New class'),
+    h('form', { onsubmit: onSubmit((f, form) => post({ kind: 'class', name: f.name, data: { hitDie: +f.hitDie, saves: [f.save1, f.save2], primaryAbility: f.primary,
+        skillCount: +f.skillCount, skillOptions: [...form.querySelectorAll('input[name=opt]:checked')].map((x) => x.value), weapons: f.weapons,
+        armor: [...form.querySelectorAll('input[name=armor]:checked')].map((x) => x.value), caster: f.caster, castingAbility: f.caster === 'none' ? undefined : f.castingAbility,
+        features: f.features.split('\n').map((line) => line.split('|').map((x) => x.trim())).filter((x) => x[1]).map(([level, name, description]) => ({ level: +level, name, description: description || '' })) } })) },
+      field('Name', h('input', { name: 'name', required: true })), field('Hit die', h('select', { name: 'hitDie' }, options(['6', '8', '10', '12'], '8'))),
+      ab('save1', 'Save 1'), ab('save2', 'Save 2'), ab('primary', 'Primary ability'),
+      field('Skills to choose', h('select', { name: 'skillCount' }, options(['1', '2', '3', '4'], '2'))),
+      h('div', { style: 'width:100%' }, h('p', { class: 'muted', style: 'margin:0' }, 'Skill options'), h('div', { style: 'display:flex;flex-wrap:wrap;gap:2px 10px' },
+        Object.keys(RULES.skills).map((x) => h('label', { class: 'inline' }, h('input', { type: 'checkbox', name: 'opt', value: x }), x)))),
+      field('Weapons', h('select', { name: 'weapons' }, options(['simple', 'martial'], 'simple'))),
+      h('div', {}, h('p', { class: 'muted', style: 'margin:0' }, 'Armour training'), ['light', 'medium', 'heavy', 'shield'].map((a) => h('label', { class: 'inline' }, h('input', { type: 'checkbox', name: 'armor', value: a }), a))),
+      field('Spellcasting', h('select', { name: 'caster' }, options(['none', 'full', 'half', 'pact'], 'none'))), field('Casting ability', h('select', { name: 'castingAbility' }, options(['int', 'wis', 'cha'], 'wis'))),
+      h('label', { style: 'width:100%' }, 'Features, one per line: level | name | description (ability increases at 4, 8, 12, 16 and an epic boon at 19 are added for you)',
+        h('textarea', { name: 'features', placeholder: '1 | Warding Bond | You protect an ally within 5 feet…' })),
+      h('button', {}, 'Add class')));
+}
+
 function choicesPanel(v) {
   const c = v.character;
   const send = (body) => run(async () => reloadCharacter(await api('POST', `/api/characters/${c.id}/choices`, body)));
@@ -475,7 +539,7 @@ function choicesPanel(v) {
         if (f.a1) increases[f.a1] = (increases[f.a1] || 0) + Number(f.n1);
         if (f.a2) increases[f.a2] = (increases[f.a2] || 0) + 1;
         const skills = [f.s1, f.s2, f.s3].filter(Boolean);
-        send({ level: ch.level, kind: ch.kind, feat: f.feat, list: f.list || undefined, increases: Object.keys(increases).length ? increases : undefined, skills: skills.length ? skills : undefined });
+        send({ className: ch.className, level: ch.level, kind: ch.kind, feat: f.feat, list: f.list || undefined, increases: Object.keys(increases).length ? increases : undefined, skills: skills.length ? skills : undefined });
       }) },
       field('Feat', h('select', { name: 'feat', onchange: (e) => show(e.target.value) }, list.map((f) => h('option', { value: f.name }, f.name)))),
       ch.kind !== 'fightingStyle' && [field('Increase', abil('a1')), field('by', h('select', { name: 'n1' }, h('option', { value: 2 }, '+2'), h('option', { value: 1 }, '+1'))),
@@ -487,16 +551,16 @@ function choicesPanel(v) {
     return form;
   };
   return h('section', { class: 'note' }, h('h3', {}, 'Level-up choices waiting'),
-    v.pendingChoices.map((ch) => h('div', {}, h('p', {}, h('strong', {}, `Level ${ch.level}: `),
+    v.pendingChoices.map((ch) => h('div', {}, h('p', {}, h('strong', {}, `${ch.className} level ${ch.level}: `),
       { subclass: 'choose your subclass', fightingStyle: 'choose a Fighting Style', feat: 'Ability Score Improvement or another feat', boon: 'choose an Epic Boon' }[ch.kind]),
       ch.kind === 'subclass'
-        ? [h('p', { class: 'muted' }, RULES.subclasses[c.className].summary), h('button', { onclick: () => send({ level: ch.level, kind: 'subclass', subclass: RULES.subclasses[c.className].name }) }, `Become ${RULES.subclasses[c.className].name}`)]
+        ? [h('p', { class: 'muted' }, RULES.subclasses[ch.className].summary), h('button', { onclick: () => send({ className: ch.className, level: ch.level, kind: 'subclass', subclass: RULES.subclasses[ch.className].name }) }, `Become ${RULES.subclasses[ch.className].name}`)]
         : featForm(ch, ch.kind === 'fightingStyle' ? ['fighting-style'] : ch.kind === 'boon' ? ['epic-boon'] : ['general', 'origin', 'fighting-style']))));
 }
 
 function featuresSection(v) {
   return h('section', {}, h('h3', {}, `Features${v.character.subclass ? ` · ${v.character.subclass}` : ''}`),
-    v.features.map((f) => h('details', {}, h('summary', {}, `Level ${f.level} · ${f.name}${f.subclass ? ` (${f.subclass})` : ''}`), h('p', { style: 'white-space:pre-wrap' }, f.description))),
+    v.features.map((f) => h('details', {}, h('summary', {}, `${f.className} ${f.level} · ${f.name}${f.subclass ? ` (${f.subclass})` : ''}`), h('p', { style: 'white-space:pre-wrap' }, f.description))),
     h('h3', {}, 'Feats'),
     v.featDetails.map((f) => h('details', {}, h('summary', {}, f.name), h('p', { style: 'white-space:pre-wrap' }, f.description))));
 }

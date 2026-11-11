@@ -114,7 +114,7 @@ async function openWorld(id) {
   state.world = await api('GET', `/api/worlds/${id}`);
   state.pages = await api('GET', `/api/worlds/${id}/pages`);
   state.results = null; state.wizard = null; state.character = null;
-  await loadCharacters();
+  await Promise.all([loadCharacters(), loadRules()]);
   await go(state.world.rootLocationId);
 }
 async function go(locId) {

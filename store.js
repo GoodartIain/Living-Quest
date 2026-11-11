@@ -23,14 +23,15 @@ const SPEC = {
   tokens: ['id', 'worldId', 'sceneId', 'name', 'x', 'y', 'size', 'color', 'visibility', 'controlledBy', 'pageId', 'characterId'],
   characters: ['id', 'worldId', 'campaignId', 'ownerId', 'ruleset', 'name', 'portraitUrl', 'personality', 'backstory', 'species', 'className',
     'background', 'abilityMethod', 'baseScores', 'backgroundBonus', 'abilities', 'skills', 'feats', 'tools', 'hp', 'conditions', 'inventory', 'currency',
-    'weapons', 'spells', 'slotsUsed', 'size', 'armor', 'shield', 'masteries', 'raging', 'deathSaves', 'hitDiceUsed', 'journal', 'choices', 'subclass'],
+    'weapons', 'spells', 'slotsUsed', 'size', 'armor', 'shield', 'masteries', 'raging', 'deathSaves', 'hitDiceUsed', 'journal', 'choices', 'subclass', 'multiclass'],
+  homebrew: ['id', 'worldId', 'kind', 'name', 'data'],
   advancements: ['id', 'worldId', 'campaignId', 'characterId', 'kind', 'amount', 'category', 'reason', 'by', 'auto', 'at'],
   rolls: ['id', 'worldId', 'sceneId', 'userId', 'userName', 'characterId', 'label', 'visibility', 'formula', 'mode', 'total', 'parts', 'at'],
   events: ['seq', 'at', 'actor', 'type', 'data'],
 };
 const COLLECTIONS = Object.keys(SPEC);
 const JSON_FIELDS = new Set(['settings', 'advancement', 'fog', 'encounter', 'controlledBy', 'data', 'baseScores', 'backgroundBonus',
-  'abilities', 'skills', 'feats', 'tools', 'hp', 'conditions', 'inventory', 'currency', 'parts', 'weapons', 'spells', 'slotsUsed', 'masteries', 'deathSaves', 'journal', 'choices']);
+  'abilities', 'skills', 'feats', 'tools', 'hp', 'conditions', 'inventory', 'currency', 'parts', 'weapons', 'spells', 'slotsUsed', 'masteries', 'deathSaves', 'journal', 'choices', 'multiclass']);
 const APPEND_ONLY = new Set(['events', 'revisions', 'advancements', 'rolls']);
 const keyOf = (c) => (c === 'events' ? 'seq' : 'id');
 const snake = (f) => f.replace(/[A-Z]/g, (m) => '_' + m.toLowerCase());
@@ -45,7 +46,7 @@ function upgrade(db) {
   for (const c of db.campaigns) { c.advancement.levelUp ??= 'confirm'; c.advancement.alignLevels ??= false; }
   for (const c of db.characters) {
     c.weapons ??= []; c.spells ??= []; c.slotsUsed ??= {}; c.armor ??= null; c.shield ??= false; c.masteries ??= []; c.raging ??= false;
-    c.deathSaves ??= { successes: 0, failures: 0 }; c.hitDiceUsed ??= 0; c.journal ??= []; c.choices ??= []; c.subclass ??= null;
+    c.deathSaves ??= { successes: 0, failures: 0 }; c.hitDiceUsed ??= 0; c.journal ??= []; c.choices ??= []; c.subclass ??= null; c.multiclass ??= {};
     c.size ??= ['Gnome', 'Halfling'].includes(c.species) ? 'Small' : 'Medium';
   }
   return db;

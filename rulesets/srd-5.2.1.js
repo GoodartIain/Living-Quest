@@ -118,20 +118,83 @@ const PACT = [[1, 1], [2, 1], [2, 2], [2, 2], [2, 3], [2, 3], [2, 4], [2, 4], [2
 const SPELLS = new Map(DATA.spells.map((sp) => [sp.name, sp]));
 const MAGIC_INITIATE_ABILITY = { Cleric: 'wis', Druid: 'wis', Wizard: 'int' }; // the feat lets you pick INT, WIS or CHA; these are the usual picks
 
-// Spellcasting from the class table, plus Magic Initiate (2 cantrips and one level 1 spell, castable once per long rest without a slot).
+// ---- Lookups. Everything below reads species/classes/backgrounds through these, so a world's homebrew works everywhere.
+const EMPTY_HOMEBREW = { species: {}, classes: {}, tables: {}, backgrounds: {} };
+let homebrewOf = () => null; // set by the app: (worldId) => { species, classes, tables, backgrounds }
+const hb = (c) => (c && c.worldId && homebrewOf(c.worldId)) || EMPTY_HOMEBREW;
+const speciesOf = (c, name = c.species) => SPECIES[name] || hb(c).species[name];
+const classOf = (c, name = c.className) => CLASSES[name] || hb(c).classes[name];
+const tableOf = (c, name = c.className) => DATA.classes[name] || hb(c).tables[name];
+const backgroundOf = (c, name = c.background) => BACKGROUNDS[name] || hb(c).backgrounds[name];
+
+// ---- Multiclassing. `c.multiclass` maps a character level ("4") to the class that level went to; unlisted levels are the primary class.
+const levelClass = (c, l) => (c.multiclass || {})[l] || c.className;
+function classLevels(c, level) {
+  const out = { [c.className]: 0 };
+  for (let l = 1; l <= level; l++) out[levelClass(c, l)] = (out[levelClass(c, l)] || 0) + 1;
+  return out;
+}
+// Proficiencies gained by multiclassing into a class (2024): armour categories, martial weapons, a skill.
+const MULTICLASS_GAINS = {
+  Barbarian: { armor: ['shield'], martial: true }, Bard: { armor: ['light'], skill: 'any' }, Cleric: { armor: ['light', 'medium', 'shield'] },
+  Druid: { armor: ['light', 'shield'] }, Fighter: { armor: ['light', 'medium', 'shield'], martial: true }, Monk: {},
+  Paladin: { armor: ['light', 'medium', 'shield'], martial: true }, Ranger: { armor: ['light', 'medium', 'shield'], martial: true, skill: 'class' },
+  Rogue: { armor: ['light'], skill: 'class' }, Sorcerer: {}, Warlock: { armor: ['light'] }, Wizard: {},
+};
+function training(c, level) {
+  const primary = classOf(c);
+  const armor = new Set(primary.armor);
+  let martial = primary.weapons === 'martial';
+  const martialIf = new Set(primary.martialIf || []);
+  for (const name of Object.keys(classLevels(c, level))) {
+    if (name === c.className) continue;
+    const g = MULTICLASS_GAINS[name] || classOf(c, name).multiclassGains || {};
+    (g.armor || []).forEach((a) => armor.add(a));
+    if (g.martial) martial = true;
+  }
+  return { armor: [...armor], martial, martialIf: [...martialIf] };
+}
+const prerequisitesMet = (c, name) => {
+  const m = (tableOf(c, name) || {}).multiclassing || { prerequisites: [], prerequisiteOptions: [] };
+  return m.prerequisites.every((p) => c.abilities[p.ability] >= p.minimum)
+    && (!m.prerequisiteOptions.length || m.prerequisiteOptions.some((p) => c.abilities[p.ability] >= p.minimum));
+};
+
+// Per-class numbers from the class tables at that class's own level (Sneak Attack dice, Rage, Martial Arts die, mastery count…).
+const classRow = (c, name, classLevel) => ((tableOf(c, name) || { levels: [] }).levels[classLevel - 1] || {});
+const special = (c, name, classLevel) => classRow(c, name, classLevel).classSpecific || {};
+const MASTERY_FIXED = { Paladin: 2, Ranger: 2, Rogue: 2 }; // 2024 classes whose table has no mastery column
+function masteryCount(c, level) {
+  const lv = classLevels(c, level);
+  return Math.max(0, ...Object.entries(lv).filter(([, n]) => n > 0).map(([k, n]) => special(c, k, n).weapon_mastery || MASTERY_FIXED[k] || 0));
+}
+// Unarmored Defense comes from the first class that grants it (2024: you never get two).
+function unarmoredFrom(c, level) {
+  const lv = classLevels(c, level);
+  const name = Object.keys(lv).find((k) => lv[k] > 0 && classOf(c, k).unarmored);
+  return name ? { name, ability: classOf(c, name).unarmored } : null;
+}
+const unarmoredOK = (c, name) => !c.armor && !(c.shield && name === 'Monk');
+
+// Spellcasting: one class uses its own table; several use the multiclass caster level (full + half rounded up). Pact Magic stays separate.
+// Magic Initiate adds 2 cantrips and one level 1 spell castable once per long rest without a slot.
 function spellcasting(c, level, mods, pb) {
-  const cls = CLASSES[c.className];
+  const lv = classLevels(c, level);
+  const casters = Object.keys(lv).filter((k) => lv[k] > 0 && classOf(c, k).caster);
   const initiate = (c.feats || []).map((f) => f.match(/^Magic Initiate \((\w+)\)$/)).find(Boolean);
-  if (!cls.caster && !initiate) return null;
-  const ability = cls.caster ? cls.castingAbility : MAGIC_INITIATE_ABILITY[initiate[1]] || 'int';
+  if (!casters.length && !initiate) return null;
+  const first = casters[0] && classOf(c, casters[0]);
+  const ability = first ? first.castingAbility : MAGIC_INITIATE_ABILITY[initiate[1]] || 'int';
   const m = mods[ability];
-  const row = DATA.classes[c.className].levels[level - 1] || {};
-  const out = { ability, saveDC: 8 + pb + m, attackBonus: pb + m, slots: [], pact: null,
-    cantripsMax: (row.cantrips || 0) + (initiate ? 2 : 0), preparedMax: (row.prepared || 0) + (initiate ? 1 : 0),
+  const sum = (field) => casters.reduce((n, k) => n + (classRow(c, k, lv[k])[field] || 0), 0);
+  const out = { ability, saveDC: 8 + pb + m, attackBonus: pb + m, slots: [], pact: null, classes: casters.map((k) => `${k} ${lv[k]}`),
+    cantripsMax: sum('cantrips') + (initiate ? 2 : 0), preparedMax: sum('prepared') + (initiate ? 1 : 0),
     freeCast: initiate ? `Magic Initiate (${initiate[1]})` : null };
-  if (cls.caster === 'full') out.slots = FULL_SLOTS[level - 1];
-  if (cls.caster === 'half') out.slots = FULL_SLOTS[Math.ceil(level / 2) - 1];
-  if (cls.caster === 'pact') out.pact = { count: PACT[level - 1][0], level: PACT[level - 1][1] };
+  const slotCasters = casters.filter((k) => classOf(c, k).caster !== 'pact');
+  const casterLevel = slotCasters.reduce((n, k) => n + (classOf(c, k).caster === 'full' ? lv[k] : Math.ceil(lv[k] / 2)), 0);
+  if (casterLevel) out.slots = FULL_SLOTS[Math.min(20, casterLevel) - 1];
+  const pact = casters.find((k) => classOf(c, k).caster === 'pact');
+  if (pact) out.pact = { count: PACT[lv[pact] - 1][0], level: PACT[lv[pact] - 1][1] };
   return out;
 }
 
@@ -145,23 +208,18 @@ function resolveSpell(e) {
     description: e.notes || '' };
 }
 
-// Per-level class numbers from the SRD tables (Sneak Attack dice, Rage damage, Martial Arts die, mastery count…).
-const classRow = (c, level) => (DATA.classes[c.className].levels[level - 1] || {});
-const special = (c, level) => classRow(c, level).classSpecific || {};
-const MASTERY_FIXED = { Paladin: 2, Ranger: 2, Rogue: 2 }; // 2024 classes whose table has no mastery column
-const masteryCount = (c, level) => special(c, level).weapon_mastery || MASTERY_FIXED[c.className] || 0;
-const unarmoredOK = (c) => !c.armor && !(c.shield && c.className === 'Monk');
-
 function weaponOf(w) {
   if (w.custom) return w.custom;
   return WEAPONS[w.weapon];
 }
+const proficientWith = (t, d) => d.category.startsWith('simple') || t.martial || t.martialIf.some((p) => has(d, p));
 function attacks(c, mods, pb, level) {
-  const cls = CLASSES[c.className];
+  const lv = classLevels(c, level);
+  const t = training(c, level);
   const feats = c.feats || [];
-  const monk = c.className === 'Monk' && unarmoredOK(c);
-  const martialDie = monk ? special(c, level).martial_arts_die : 0;
-  const rage = c.className === 'Barbarian' && c.raging ? special(c, level).rage_damage_bonus || 0 : 0;
+  const monk = lv.Monk > 0 && unarmoredOK(c, 'Monk');
+  const martialDie = monk ? special(c, 'Monk', lv.Monk).martial_arts_die : 0;
+  const rage = lv.Barbarian > 0 && c.raging ? special(c, 'Barbarian', lv.Barbarian).rage_damage_bonus || 0 : 0;
   const unarmedAbility = monk && mods.dex > mods.str ? 'dex' : 'str';
   const unarmedDamage = monk ? `1d${martialDie}${signedMod(mods[unarmedAbility] + rage)}` : `1${signedMod(mods.str + rage)}`;
   const list = [{ id: 'unarmed', name: 'Unarmed Strike', ability: unarmedAbility, toHit: mods[unarmedAbility] + pb, damage: unarmedDamage, type: 'bludgeoning', properties: [], proficient: true }];
@@ -171,7 +229,7 @@ function attacks(c, mods, pb, level) {
     const monkWeapon = monk && (d.category === 'simple melee' || (d.category === 'martial melee' && has(d, 'Light')));
     const finesse = has(d, 'Finesse') || monkWeapon;
     const ability = finesse ? (mods.dex > mods.str ? 'dex' : 'str') : ranged ? 'dex' : 'str';
-    const proficient = d.category.startsWith('simple') || cls.weapons === 'martial' || (cls.martialIf || []).some((p) => has(d, p));
+    const proficient = proficientWith(t, d) || monkWeapon;
     const bonus = w.bonus || 0; // magic weapon +1..+3
     const archery = ranged && feats.includes('Archery') ? 2 : 0;
     const dmgBonus = mods[ability] + bonus + (ability === 'str' && !ranged ? rage : 0);
@@ -187,32 +245,33 @@ function attacks(c, mods, pb, level) {
   return list;
 }
 
-function armorClass(c, mods) {
-  const cls = CLASSES[c.className];
+function armorClass(c, mods, level) {
+  const t = training(c, level);
+  const unarmored = unarmoredFrom(c, level);
   const notes = [];
   let ac;
   let speedPenalty = 0;
   if (c.armor) {
     const a = DATA.armor[c.armor];
     ac = a.base + (a.dexMax === null ? mods.dex : Math.min(mods.dex, a.dexMax));
-    if (!cls.armor.includes(a.category)) notes.push(`Not trained with ${a.category} armour: Disadvantage on Strength and Dexterity D20 Tests, and no spellcasting.`);
+    if (!t.armor.includes(a.category)) notes.push(`Not trained with ${a.category} armour: Disadvantage on Strength and Dexterity D20 Tests, and no spellcasting.`);
     if (a.strength && c.abilities.str < a.strength) { speedPenalty = 10; notes.push(`Strength below ${a.strength}: speed −10 ft.`); }
     if (a.stealthDisadvantage) notes.push('Disadvantage on Stealth checks.');
     if ((c.feats || []).includes('Defense')) ac += 1;
   } else {
-    ac = 10 + mods.dex + (cls.unarmored && unarmoredOK(c) ? mods[cls.unarmored] : 0);
+    ac = 10 + mods.dex + (unarmored && unarmoredOK(c, unarmored.name) ? mods[unarmored.ability] : 0);
   }
   if (c.shield) {
     ac += DATA.armor.Shield.base;
-    if (!cls.armor.includes('shield')) notes.push('Not trained with shields: Disadvantage on Strength and Dexterity D20 Tests, and no spellcasting.');
+    if (!t.armor.includes('shield')) notes.push('Not trained with shields: Disadvantage on Strength and Dexterity D20 Tests, and no spellcasting.');
   }
-  return { ac, speedPenalty, notes, label: c.armor ? `${c.armor}${c.shield ? ' + Shield' : ''}` : cls.unarmored && unarmoredOK(c) ? `Unarmored Defense${c.shield ? ' + Shield' : ''}` : c.shield ? 'Shield' : 'unarmored' };
+  const ud = !c.armor && unarmored && unarmoredOK(c, unarmored.name);
+  return { ac, speedPenalty, notes, label: c.armor ? `${c.armor}${c.shield ? ' + Shield' : ''}` : ud ? `Unarmored Defense${c.shield ? ' + Shield' : ''}` : c.shield ? 'Shield' : 'unarmored' };
 }
 
-function weaponProficient(c, name) {
-  const cls = CLASSES[c.className];
+function weaponProficient(c, name, level = 1) {
   const d = WEAPONS[name];
-  return !!d && (d.category.startsWith('simple') || cls.weapons === 'martial' || (cls.martialIf || []).some((p) => has(d, p)));
+  return !!d && proficientWith(training(c, level), d);
 }
 const signedMod = (n) => (n === 0 ? '' : n > 0 ? `+${n}` : String(n));
 
@@ -248,10 +307,11 @@ function pickSkills(chosen, rule, taken, label) {
 }
 
 // input: { species, className, background, abilityMethod, baseScores {str..cha}, backgroundBonus {ability: 1|2}, classSkills [], speciesSkills [] }
-function create(input) {
-  const species = SPECIES[input.species] || bad('unknown species');
-  const cls = CLASSES[input.className] || bad('unknown class');
-  const bg = BACKGROUNDS[input.background] || bad('unknown background');
+// ctx: { worldId } so the world's homebrew can be chosen.
+function create(input, ctx = {}) {
+  const species = speciesOf(ctx, input.species) || bad('unknown species');
+  const cls = classOf(ctx, input.className) || bad('unknown class');
+  const bg = backgroundOf(ctx, input.background) || bad('unknown background');
 
   const base = input.baseScores || {};
   const values = ABILITIES.map((a) => base[a]);
@@ -287,25 +347,35 @@ function create(input) {
   };
 }
 
+// Level 1 takes the primary class's full hit die; every later level the fixed average of the die of the class it went to.
 function maxHp(c, level) {
-  const die = CLASSES[c.className].hitDie;
   const con = mod(c.abilities.con);
-  const extra = SPECIES[c.species].hpPerLevel || 0;
-  // Level 1: full hit die; later levels take the fixed average (die/2 + 1). Each level adds at least 1.
-  let hp = Math.max(1, die + con) + extra;
-  for (let l = 2; l <= level; l++) hp += Math.max(1, die / 2 + 1 + con) + extra;
+  const extra = speciesOf(c).hpPerLevel || 0;
+  let hp = Math.max(1, classOf(c).hitDie + con) + extra;
+  for (let l = 2; l <= level; l++) hp += Math.max(1, classOf(c, levelClass(c, l)).hitDie / 2 + 1 + con) + extra;
   return hp;
+}
+// Hit Point Dice by size, largest first (short rests spend the largest unspent dice).
+function hitDice(c, level) {
+  const out = [];
+  for (let l = 1; l <= level; l++) out.push(classOf(c, levelClass(c, l)).hitDie);
+  return out.sort((a, b) => b - a);
 }
 
 function derive(c, level) {
   const pb = proficiency(level);
-  const cls = CLASSES[c.className];
-  const species = SPECIES[c.species];
+  const cls = classOf(c);
+  const species = speciesOf(c);
+  const lv = classLevels(c, level);
   const mods = Object.fromEntries(ABILITIES.map((a) => [a, mod(c.abilities[a])]));
-  const ac = armorClass(c, mods);
+  const ac = armorClass(c, mods, level);
   const skills = Object.fromEntries(ALL.map((s) => [s, mods[SKILLS[s]] + (c.skills.includes(s) ? pb : 0)]));
+  const dice = hitDice(c, level);
+  const counts = dice.reduce((m, d) => ({ ...m, [d]: (m[d] || 0) + 1 }), {});
+  const unarmored = unarmoredFrom(c, level);
   return {
     proficiencyBonus: pb,
+    classes: lv,
     modifiers: mods,
     saves: Object.fromEntries(ABILITIES.map((a) => [a, mods[a] + (cls.saves.includes(a) ? pb : 0)])),
     savingThrowProficiencies: cls.saves,
@@ -314,39 +384,49 @@ function derive(c, level) {
     initiative: mods.dex + (c.feats.includes('Alert') ? pb : 0),
     armorClass: ac.ac,
     armor: ac,
-    speed: species.speed - ac.speedPenalty + (c.className === 'Monk' && unarmoredOK(c) ? special(c, level).unarmored_movement_bonus || 0 : 0),
+    training: training(c, level),
+    speed: species.speed - ac.speedPenalty + (lv.Monk > 0 && unarmoredOK(c, 'Monk') && unarmored && unarmored.name === 'Monk' ? special(c, 'Monk', lv.Monk).unarmored_movement_bonus || 0 : 0),
     size: c.size || species.size,
-    hitDie: `d${cls.hitDie}`,
+    hitDie: Object.keys(counts).sort((a, b) => b - a).map((d) => (Object.keys(counts).length > 1 ? `${counts[d]}d${d}` : `d${d}`)).join(' + '),
+    hitDice: dice,
     maxHp: maxHp(c, level),
     traits: species.traits,
     attacks: attacks(c, mods, pb, level),
-    sneakAttack: c.className === 'Rogue' ? `${special(c, level).sneak_attack.dice_count}d${special(c, level).sneak_attack.dice_value}` : null,
-    rage: c.className === 'Barbarian' ? { uses: special(c, level).rage_count, damage: special(c, level).rage_damage_bonus, active: !!c.raging } : null,
-    martialArtsDie: c.className === 'Monk' ? `1d${special(c, level).martial_arts_die}` : null,
+    sneakAttack: lv.Rogue > 0 ? `${special(c, 'Rogue', lv.Rogue).sneak_attack.dice_count}d${special(c, 'Rogue', lv.Rogue).sneak_attack.dice_value}` : null,
+    rage: lv.Barbarian > 0 ? { uses: special(c, 'Barbarian', lv.Barbarian).rage_count, damage: special(c, 'Barbarian', lv.Barbarian).rage_damage_bonus, active: !!c.raging } : null,
+    martialArtsDie: lv.Monk > 0 ? `1d${special(c, 'Monk', lv.Monk).martial_arts_die}` : null,
     masteries: { allowed: masteryCount(c, level), chosen: c.masteries || [] },
     spellcasting: spellcasting(c, level, mods, pb),
   };
 }
 
-// ---- Level-up choices (subclass, feats/ASI, fighting styles, epic boons) and starting equipment.
+// ---- Level-up choices (subclass, feats/ASI, fighting styles, epic boons) and starting equipment, per class level.
 const FEATS = new Map(DATA.feats.map((f) => [f.name, f]));
 const featBase = (n) => n.replace(/ \((Cleric|Druid|Wizard)\)$/, '');
-const hasFeature = (c, level, name) => DATA.classes[c.className].levels.slice(0, level).some((r) => r.features.includes(name));
+const subclassOf = (c, name) => ((c.choices || []).find((x) => x.kind === 'subclass' && (x.className || c.className) === name) || {}).subclass || null;
+const hasFeature = (c, level, featureName) => Object.entries(classLevels(c, level))
+  .some(([k, n]) => (tableOf(c, k) || { levels: [] }).levels.slice(0, n).some((r) => r.features.includes(featureName)));
 
 function requiredChoices(c, level) {
   const out = [];
-  for (const r of DATA.classes[c.className].levels.slice(0, level)) {
-    if (r.features.includes(`${c.className} Subclass`) && !out.some((x) => x.kind === 'subclass')) out.push({ level: r.level, kind: 'subclass' });
-    if (r.features.includes('Fighting Style')) out.push({ level: r.level, kind: 'fightingStyle' });
-    if (r.features.includes('Ability Score Improvement')) out.push({ level: r.level, kind: 'feat' });
-    if (r.features.includes('Epic Boon')) out.push({ level: r.level, kind: 'boon' });
-  }
-  for (const f of c.subclass ? DATA.classes[c.className].subclass.features : []) {
-    if (f.name === 'Additional Fighting Style' && f.level <= level) out.push({ level: f.level, kind: 'fightingStyle' });
+  for (const [name, n] of Object.entries(classLevels(c, level))) {
+    const table = tableOf(c, name);
+    const add = (lvl, kind) => out.push({ className: name, level: lvl, kind });
+    let sub = false;
+    for (const r of table.levels.slice(0, n)) {
+      if (r.features.includes(`${name} Subclass`) && !sub && table.subclass) { add(r.level, 'subclass'); sub = true; }
+      if (r.features.includes('Fighting Style')) add(r.level, 'fightingStyle');
+      if (r.features.includes('Ability Score Improvement')) add(r.level, 'feat');
+      if (r.features.includes('Epic Boon')) add(r.level, 'boon');
+    }
+    for (const f of subclassOf(c, name) && table.subclass ? table.subclass.features : []) {
+      if (f.name === 'Additional Fighting Style' && f.level <= n) add(f.level, 'fightingStyle');
+    }
   }
   return out;
 }
-const pendingChoices = (c, level) => requiredChoices(c, level).filter((r) => !(c.choices || []).some((x) => x.level === r.level && x.kind === r.kind));
+const sameChoice = (c, a, b) => (a.className || c.className) === (b.className || c.className) && a.level === b.level && a.kind === b.kind;
+const pendingChoices = (c, level) => requiredChoices(c, level).filter((r) => !(c.choices || []).some((x) => sameChoice(c, x, r)));
 
 function raise(abilities, increases, allowed, total, cap) {
   const keys = Object.keys(increases || {});
@@ -362,23 +442,24 @@ function raise(abilities, increases, allowed, total, cap) {
   return next;
 }
 
-// Validates one choice and returns the character fields it changes plus the record to keep.
+// Validates one choice ({ className?, level (class level), kind, … }) and returns the fields it changes plus the record to keep.
 function applyChoice(c, level, input) {
-  const want = pendingChoices(c, level).find((r) => r.level === input.level && r.kind === input.kind) || bad(`no ${input.kind} choice is due at level ${input.level}`);
-  const record = { level: want.level, kind: want.kind };
+  const className = input.className || c.className;
+  const want = pendingChoices(c, level).find((r) => sameChoice(c, r, { ...input, className })) || bad(`no ${input.kind} choice is due at ${className} level ${input.level}`);
+  const record = { className, level: want.level, kind: want.kind };
   const owned = new Set((c.feats || []).map(featBase));
   if (want.kind === 'subclass') {
-    const sub = DATA.classes[c.className].subclass;
-    if (input.subclass !== sub.name) bad(`the SRD ${c.className} subclass is ${sub.name}`);
-    return { patch: { subclass: sub.name }, record: { ...record, subclass: sub.name } };
+    const sub = tableOf(c, className).subclass;
+    if (input.subclass !== sub.name) bad(`the ${className} subclass is ${sub.name}`);
+    return { patch: className === c.className ? { subclass: sub.name } : {}, record: { ...record, subclass: sub.name } };
   }
   const feat = FEATS.get(input.feat) || bad('unknown feat');
   if (feat.minLevel > level) bad(`${feat.name} needs level ${feat.minLevel}`);
-  if (feat.needsFeature && feat.needsFeature !== 'Fighting Style' && !(feat.needsFeature === 'Spellcasting' && CLASSES[c.className].caster)) bad(`${feat.name} needs the ${feat.needsFeature} feature`);
+  if (feat.needsFeature === 'Spellcasting' && !spellcasting(c, level, Object.fromEntries(ABILITIES.map((a) => [a, mod(c.abilities[a])])), 2)) bad(`${feat.name} needs the Spellcasting feature`);
   if (want.kind === 'fightingStyle' && feat.type !== 'fighting-style') bad('choose a Fighting Style feat');
   if (want.kind === 'boon' && feat.type !== 'epic-boon') bad('choose an Epic Boon');
   if (want.kind === 'feat' && !['general', 'origin', 'fighting-style'].includes(feat.type)) bad('choose a general, origin or fighting style feat');
-  if (feat.type === 'fighting-style' && !hasFeature(c, level, 'Fighting Style')) bad(`${c.className}s have no Fighting Style feature`);
+  if (feat.type === 'fighting-style' && !hasFeature(c, level, 'Fighting Style')) bad('you have no Fighting Style feature');
   let name = feat.name;
   const patch = {};
   if (feat.name === 'Magic Initiate') {
@@ -399,11 +480,44 @@ function applyChoice(c, level, input) {
   return { patch, record: { ...record, feat: name, ...(input.increases && { increases: input.increases }), ...(patch.skills && { skills: input.skills }) } };
 }
 
+// Assign the character's newest level to another class (or back to the primary one). Returns the new multiclass map
+// and any skill the new class grants. Undoing is allowed while no choice has been made for that class level.
+function assignLevel(c, level, input) {
+  const target = input.className;
+  if (!classOf(c, target)) bad('unknown class');
+  if (level < 2) bad('multiclassing starts at level 2');
+  const lv = classLevels(c, level);
+  const current = levelClass(c, level);
+  if (current === target) bad(`level ${level} is already ${target}`);
+  const currentClassLevel = lv[current];
+  if ((c.choices || []).some((x) => (x.className || c.className) === current && x.level === currentClassLevel)) bad(`a choice was already made for ${current} level ${currentClassLevel}`);
+  const after = { ...(c.multiclass || {}) };
+  if (target === c.className) delete after[level]; else after[level] = target;
+  const newClass = !(lv[target] > 0) && target !== c.className;
+  const patch = { multiclass: after };
+  if (newClass) {
+    for (const k of Object.keys(lv).filter((k) => lv[k] > 0)) if (!prerequisitesMet(c, k)) bad(`multiclassing needs the ${k} prerequisites (13 in its primary ability)`);
+    if (!prerequisitesMet(c, target)) bad(`multiclassing into ${target} needs 13 in its primary ability`);
+    const gain = (MULTICLASS_GAINS[target] || classOf(c, target).multiclassGains || {}).skill;
+    if (gain) {
+      const options = gain === 'any' ? ALL : classOf(c, target).skills.from;
+      if (!options.includes(input.skill)) bad(`${target} gives one skill proficiency: choose from ${options.join(', ')}`);
+      if (c.skills.includes(input.skill)) bad(`${input.skill} is already proficient`);
+      patch.skills = [...c.skills, input.skill];
+    }
+  } else if (input.skill !== undefined) bad('only a first level in a new class grants a skill');
+  return patch;
+}
+
 function classFeatures(c, level) {
-  const cls = DATA.classes[c.className];
-  return [...cls.features.filter((f) => f.level <= level),
-    ...(c.subclass ? cls.subclass.features.filter((f) => f.level <= level).map((f) => ({ ...f, subclass: cls.subclass.name })) : [])]
-    .sort((a, b) => a.level - b.level);
+  const out = [];
+  for (const [name, n] of Object.entries(classLevels(c, level))) {
+    const table = tableOf(c, name);
+    const sub = subclassOf(c, name);
+    out.push(...table.features.filter((f) => f.level <= n).map((f) => ({ ...f, className: name })),
+      ...(sub && table.subclass ? table.subclass.features.filter((f) => f.level <= n).map((f) => ({ ...f, className: name, subclass: sub })) : []));
+  }
+  return out.sort((a, b) => (a.className === b.className ? a.level - b.level : a.className === c.className ? -1 : 1));
 }
 const featInfo = (names) => names.map((n) => ({ name: n, description: (FEATS.get(featBase(n)) || {}).description || '' }));
 
@@ -413,18 +527,18 @@ function startingEquipment(c, classPick, backgroundPick) {
   let gp = 0;
   const take = (sets, pick, label) => {
     if (pick === undefined || pick === null) return;
-    const set = sets[0];
+    const set = (sets || [])[0];
     if (!set) return;
     const opt = set.options[pick] || bad(`${label} equipment: choose option ${set.options.map((_, i) => String.fromCharCode(65 + i)).join(', ')}`);
     items.push(...opt.items);
     gp += opt.gp;
   };
-  take(DATA.classes[c.className].startingEquipment, classPick, c.className);
-  take(DATA.backgrounds[c.background].startingEquipment, backgroundPick, c.background);
-  const cls = CLASSES[c.className];
+  take(tableOf(c).startingEquipment, classPick, c.className);
+  take((DATA.backgrounds[c.background] || backgroundOf(c) || {}).startingEquipment, backgroundPick, c.background);
+  const t = training(c, 1);
   const weapons = items.filter((i) => WEAPONS[i.name]).map((i) => ({ weapon: i.name }));
-  const armor = items.map((i) => i.name).find((n) => DATA.armor[n] && n !== 'Shield' && cls.armor.includes(DATA.armor[n].category)) || null;
-  const shield = items.some((i) => i.name === 'Shield') && cls.armor.includes('shield');
+  const armor = items.map((i) => i.name).find((n) => DATA.armor[n] && n !== 'Shield' && t.armor.includes(DATA.armor[n].category)) || null;
+  const shield = items.some((i) => i.name === 'Shield') && t.armor.includes('shield');
   return { inventory: items.map((i) => ({ name: i.name, qty: i.count, notes: '' })), gp, weapons, armor, shield };
 }
 
@@ -436,5 +550,6 @@ const options = {
   attribution: 'Includes material from the System Reference Document 5.2.1 ("SRD 5.2.1") by Wizards of the Coast LLC, licensed under CC-BY-4.0.',
 };
 
-module.exports = { id: 'srd-5.2.1', options, create, derive, xpLevel, proficiency, MAX_LEVEL, CONDITIONS, SKILLS, ABILITIES, WEAPONS, DATA, masteryCount, spellFormulas, weaponProficient, resolveSpell, SPELLS,
+module.exports = { id: 'srd-5.2.1', options, create, derive, assignLevel, classLevels, prerequisitesMet,
+  setHomebrew: (fn) => { homebrewOf = fn; }, speciesOf, classOf, tableOf, backgroundOf, xpLevel, proficiency, MAX_LEVEL, CONDITIONS, SKILLS, ABILITIES, WEAPONS, DATA, masteryCount, spellFormulas, weaponProficient, resolveSpell, SPELLS,
   pendingChoices, applyChoice, classFeatures, featInfo, startingEquipment };
