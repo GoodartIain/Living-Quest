@@ -27,6 +27,10 @@
   svg.map { width:100%; aspect-ratio:4/3; background:var(--bg); border:1px solid var(--line); border-radius:6px; }
   .pin circle { fill:var(--accent); cursor:pointer; } .pin text { fill:var(--fg); font-size:3px; }
   .muted { color:var(--muted); font-size:13px; } .err { color:#c0392b; min-height:1.5em; }
+  svg.board { width:100%; height:auto; max-height:75vh; background:#d9cdb8; border-radius:6px; touch-action:none; user-select:none; }
+  .board .tok text { font-size:0.32px; fill:#fff; paint-order:stroke; stroke:#000; stroke-width:0.06px; pointer-events:none; }
+  .modes button[aria-pressed=true] { outline:2px solid var(--fg); }
+  .turn { font-weight:600; }
   .note { background:var(--note); border-radius:6px; padding:8px; margin:8px 0; }
   .prose p { white-space:pre-wrap; margin:6px 0; }
   ul { padding-left:18px; margin:4px 0; }
@@ -42,7 +46,7 @@
 const $app = document.getElementById('app');
 let token = localStorage.getItem('lq-token');
 // loc: current location view; page: a non-location page open beside the map; results: search hits.
-const state = { world: null, loc: null, page: null, pages: [], results: null, pick: null };
+const state = { world: null, loc: null, page: null, pages: [], results: null, pick: null, scene: null };
 
 // Build DOM with textContent only, so user-entered text never becomes HTML.
 function h(tag, attrs = {}, ...kids) {
@@ -112,6 +116,7 @@ async function openWorld(id) {
   await go(state.world.rootLocationId);
 }
 async function go(locId) {
+  closeScene();
   state.loc = await api('GET', `/api/locations/${locId}`);
   state.page = null; state.pick = null;
   render();
@@ -131,6 +136,7 @@ async function refresh() {
 
 function renderWorld() {
   const w = state.world, v = state.loc, gm = w.role === 'gm';
+  if (state.scene) return renderScene();
   $app.append(h('section', {},
     h('div', { class: 'crumbs' }, h('button', { class: 'link', onclick: () => { state.world = null; render(); } }, 'All worlds'), '›', h('strong', {}, w.name), h('span', {}, `(${w.role})`)),
     h('p', { class: 'muted' }, `Ruleset ${w.settings.ruleset} · default advancement ${w.settings.advancement} · NPC autonomy ${w.settings.npcAutonomy}`),
@@ -167,6 +173,15 @@ function renderWorld() {
       svg,
       v.children.length ? h('ul', {}, v.children.map((c) => h('li', {}, h('button', { class: 'link', onclick: () => run(() => go(c.id)) }, c.name), ` — ${c.type}`,
         gm ? ` [${c.visibility}${c.requiresDiscovery ? ', needs discovery' : ''}]` : ''))) : h('p', { class: 'muted' }, 'No known places here.'),
+      h('h3', {}, 'Scenes'),
+      v.scenes.length ? h('ul', {}, v.scenes.map((s) => h('li', {}, h('button', { class: 'link', onclick: () => run(() => openScene(s.id)) }, s.name), gm ? ` [${s.visibility}]` : '')))
+        : h('p', { class: 'muted' }, 'No scenes here.'),
+      gm && h('form', { onsubmit: onSubmit(async (f) => { const s = await api('POST', `/api/locations/${v.location.id}/scenes`, { name: f.name, grid: f.grid, cols: +f.cols, rows: +f.rows }); await openScene(s.id); }) },
+        field('New scene', h('input', { name: 'name', required: true })),
+        field('Grid', h('select', { name: 'grid' }, options(['square', 'none'], 'square'))),
+        field('Columns', h('input', { name: 'cols', type: 'number', min: 1, max: 200, value: 20, size: 3 })),
+        field('Rows', h('input', { name: 'rows', type: 'number', min: 1, max: 200, value: 15, size: 3 })),
+        h('button', {}, 'Create scene')),
       gm && addPlaceForm(v), gm && locationSettings(v)),
     pagePanel(state.page || v, gm)));
 }
@@ -264,6 +279,189 @@ function pageEditor(v) {
           h('button', { class: 'link', onclick: () => run(async () => { await api('PATCH', `/api/pages/${p.id}`, { title: r.title, body: r.body, gmNotes: r.gmNotes }); await refresh(); }) }, 'restore')))
           : [h('li', { class: 'muted' }, 'No earlier versions.')]));
       }) }, h('summary', {}, 'History'), history));
+}
+
+// ---- Milestone 3: live 2D scene. The server pushes a per-viewer projection; we only draw what arrives.
+function closeScene() {
+  if (state.scene) state.scene.es.close();
+  state.scene = null;
+}
+async function openScene(id) {
+  closeScene();
+  state.world = await api('GET', `/api/worlds/${state.world.id}`); // fresh member list for token controllers
+  const first = await api('GET', `/api/scenes/${id}`); // surfaces permission errors before streaming
+  const es = new EventSource(`/api/scenes/${id}/stream?token=${encodeURIComponent(token)}`);
+  state.scene = { id, es, view: first, mode: 'move', drag: null, measure: null, busy: false, stale: false };
+  // Never redraw mid-gesture: replacing the SVG would drop the pointer capture.
+  es.onmessage = (e) => { const sc = state.scene; if (!sc || sc.es !== es) return; sc.view = JSON.parse(e.data); if (sc.busy) sc.stale = true; else { drawBoard(); drawEncounter(); } };
+  es.addEventListener('gone', () => { closeScene(); document.getElementById('err').textContent = 'This scene is no longer shared with you.'; render(); });
+  render();
+}
+
+function renderScene() {
+  const sc = state.scene, v = sc.view, gm = v.role === 'gm';
+  const modes = [['move', 'Move'], ['measure', 'Measure'], ...(gm ? [['reveal', 'Reveal fog'], ['hide', 'Hide fog'], ['place', 'Place token']] : [])];
+  $app.append(h('section', {},
+    h('div', { class: 'crumbs' }, h('button', { class: 'link', onclick: () => run(() => go(state.loc.location.id)) }, `‹ ${state.loc.location.name}`), '›', h('strong', {}, v.scene.name), h('span', {}, `(${v.role})`)),
+    h('div', { class: 'modes', role: 'toolbar', 'aria-label': 'Board tools', style: 'display:flex;gap:6px;flex-wrap:wrap;margin:8px 0' },
+      modes.map(([m, label]) => h('button', { 'aria-pressed': String(sc.mode === m), onclick: (e) => {
+        sc.mode = m; sc.measure = null; // redraw only the board, so half-filled forms survive
+        e.target.parentNode.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', String(x === e.target)));
+        drawBoard();
+      } }, label)),
+      h('span', { id: 'readout', class: 'muted', 'aria-live': 'polite' }))));
+  $app.append(h('div', { class: 'row' },
+    h('section', {}, h('div', { id: 'board' })),
+    h('section', {}, h('div', { id: 'enc' }), gm && sceneGmTools(v))));
+  drawBoard(); drawEncounter();
+}
+
+function boardPoint(svg, e) {
+  const p = svg.createSVGPoint(); p.x = e.clientX; p.y = e.clientY;
+  return p.matrixTransform(svg.getScreenCTM().inverse());
+}
+const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
+
+function drawBoard() {
+  const host = document.getElementById('board');
+  if (!host) return;
+  const sc = state.scene, { scene, tokens, role, encounter } = sc.view, gm = role === 'gm';
+  const S = (tag, a, ...k) => h(tag, { svg: 1, ...a }, ...k);
+  const svg = h('svg', { class: 'board', viewBox: `0 0 ${scene.cols} ${scene.rows}`, role: 'application', 'aria-label': `${scene.name} board` });
+  if (scene.backgroundUrl) svg.append(S('image', { href: scene.backgroundUrl, width: scene.cols, height: scene.rows, preserveAspectRatio: 'none' }));
+  if (scene.grid === 'square') {
+    const d = [];
+    for (let x = 0; x <= scene.cols; x++) d.push(`M${x} 0V${scene.rows}`);
+    for (let y = 0; y <= scene.rows; y++) d.push(`M0 ${y}H${scene.cols}`);
+    svg.append(S('path', { d: d.join(''), stroke: '#0003', 'stroke-width': 0.03, fill: 'none' }));
+  }
+  if (scene.fog.enabled) {
+    const open = new Set(scene.fog.revealed), d = [];
+    for (let x = 0; x < scene.cols; x++) for (let y = 0; y < scene.rows; y++) if (!open.has(`${x},${y}`)) d.push(`M${x} ${y}h1v1h-1z`);
+    svg.append(S('path', { d: d.join(''), fill: '#111', opacity: gm ? 0.45 : 1, 'shape-rendering': 'crispEdges' }));
+  }
+  for (const t of tokens) {
+    const r = t.size / 2;
+    const g = S('g', { class: 'tok', transform: `translate(${t.x + r} ${t.y + r})`, 'data-id': t.id, style: t.mine && sc.mode === 'move' ? 'cursor:grab' : '' },
+      encounter && encounter.turnTokenId === t.id && S('circle', { r: r * 0.98, fill: 'none', stroke: '#ffd54a', 'stroke-width': 0.12 }),
+      S('circle', { r: r * 0.8, fill: t.color, stroke: t.mine ? '#fff' : '#0008', 'stroke-width': 0.06, opacity: t.visibility === 'gm' ? 0.6 : 1, 'stroke-dasharray': t.visibility === 'gm' ? '0.15 0.1' : null }),
+      S('text', { y: r * 0.8 + 0.35, 'text-anchor': 'middle' }, t.name), S('title', {}, t.name));
+    svg.append(g);
+  }
+  const overlay = S('g', { 'pointer-events': 'none' });
+  const paintOverlay = () => overlay.replaceChildren(...[
+    sc.measure && S('line', { x1: sc.measure.a.x, y1: sc.measure.a.y, x2: sc.measure.b.x, y2: sc.measure.b.y, stroke: '#c0392b', 'stroke-width': 0.08, 'stroke-dasharray': '0.2 0.1' }),
+    sc.rect && S('rect', { ...sc.rect, fill: sc.mode === 'reveal' ? '#fff5' : '#0005', stroke: '#fff', 'stroke-width': 0.05 }),
+  ].filter(Boolean));
+  paintOverlay();
+  svg.append(overlay);
+
+  const cellOf = (p) => ({ x: clamp(Math.floor(p.x), 0, scene.cols - 1), y: clamp(Math.floor(p.y), 0, scene.rows - 1) });
+  svg.addEventListener('pointerdown', (e) => {
+    const p = boardPoint(svg, e);
+    const tokEl = e.target.closest('.tok');
+    if (sc.mode === 'move' && tokEl) {
+      const t = tokens.find((x) => x.id === tokEl.dataset.id);
+      if (!t || !t.mine) return;
+      sc.drag = { t, el: tokEl, dx: p.x - t.x, dy: p.y - t.y, x: t.x, y: t.y };
+    } else if (sc.mode === 'measure') sc.measure = { a: p, b: p };
+    else if (sc.mode === 'reveal' || sc.mode === 'hide') sc.fogStart = cellOf(p);
+    else return;
+    sc.busy = true;
+    svg.setPointerCapture(e.pointerId);
+  });
+  svg.addEventListener('pointermove', (e) => {
+    const p = boardPoint(svg, e);
+    if (sc.drag) {
+      const d = sc.drag, r = d.t.size / 2;
+      d.x = clamp(p.x - d.dx, 0, scene.cols - d.t.size); d.y = clamp(p.y - d.dy, 0, scene.rows - d.t.size);
+      if (scene.grid === 'square') { d.x = Math.round(d.x); d.y = Math.round(d.y); }
+      d.el.setAttribute('transform', `translate(${d.x + r} ${d.y + r})`);
+    } else if (sc.measure && e.buttons) {
+      sc.measure.b = p;
+      const dx = Math.abs(p.x - sc.measure.a.x), dy = Math.abs(p.y - sc.measure.a.y);
+      // SRD 5e grid rule: every square, diagonal or not, is 5 ft.
+      const cells = scene.grid === 'square' ? Math.max(Math.abs(cellOf(p).x - cellOf(sc.measure.a).x), Math.abs(cellOf(p).y - cellOf(sc.measure.a).y)) : Math.hypot(dx, dy);
+      document.getElementById('readout').textContent = `${+cells.toFixed(1)} squares · ${Math.round(cells * 5)} ft`;
+      paintOverlay();
+    } else if (sc.fogStart && e.buttons) {
+      const c = cellOf(p), a = sc.fogStart;
+      sc.rect = { x: Math.min(a.x, c.x), y: Math.min(a.y, c.y), width: Math.abs(a.x - c.x) + 1, height: Math.abs(a.y - c.y) + 1 };
+      paintOverlay();
+    }
+  });
+  svg.addEventListener('pointercancel', () => { sc.busy = false; sc.drag = null; sc.fogStart = null; sc.rect = null; drawLater(); });
+  svg.addEventListener('pointerup', (e) => {
+    const p = boardPoint(svg, e);
+    sc.busy = false;
+    if (sc.stale) { sc.stale = false; drawEncounter(); if (!sc.drag) drawLater(); }
+    if (sc.drag) {
+      const d = sc.drag; sc.drag = null;
+      // On failure the next draw snaps the token back to the server's position.
+      if (d.x !== d.t.x || d.y !== d.t.y) run(() => api('PATCH', `/api/tokens/${d.t.id}`, { x: d.x, y: d.y })).then(() => drawBoard());
+      else drawBoard();
+    } else if (sc.fogStart) {
+      const a = sc.fogStart, c = cellOf(p); sc.fogStart = null; sc.rect = null;
+      run(() => api('POST', `/api/scenes/${scene.id}/fog`, { x0: a.x, y0: a.y, x1: c.x, y1: c.y, reveal: sc.mode === 'reveal' }));
+    } else if (sc.mode === 'place') {
+      const f = Object.fromEntries(new FormData(document.getElementById('tokform')));
+      const c = cellOf(p), size = +f.size || 1;
+      run(() => api('POST', `/api/scenes/${scene.id}/tokens`, { name: f.name || 'Token', color: f.color, visibility: f.visibility, size,
+        x: clamp(c.x, 0, scene.cols - size), y: clamp(c.y, 0, scene.rows - size), controlledBy: f.controller ? [f.controller] : [] }));
+    }
+  });
+  host.replaceChildren(svg);
+}
+let drawQueued = false;
+function drawLater() { if (!drawQueued) { drawQueued = true; requestAnimationFrame(() => { drawQueued = false; drawBoard(); }); } }
+
+function drawEncounter() {
+  const host = document.getElementById('enc');
+  if (!host) return;
+  const { scene, tokens, encounter, role } = state.scene.view, gm = role === 'gm';
+  const name = (id) => (tokens.find((t) => t.id === id) || {}).name || '?';
+  const put = (combatants) => run(() => api('PUT', `/api/scenes/${scene.id}/encounter`, { combatants }));
+  host.replaceChildren(h('div', {}, h('h2', {}, 'Encounter'),
+    !encounter ? [h('p', { class: 'muted' }, 'No encounter running.'),
+      gm && tokens.length > 0 && h('button', { onclick: () => put(tokens.map((t) => ({ tokenId: t.id, initiative: 0 }))) }, 'Start with all tokens')]
+    : [h('p', {}, `Round ${encounter.round}`),
+      h('ol', {}, encounter.combatants.map((c) => h('li', { class: c.tokenId === encounter.turnTokenId ? 'turn' : '', 'aria-current': c.tokenId === encounter.turnTokenId ? 'true' : null },
+        `${name(c.tokenId)} — ${c.initiative} `,
+        gm && [h('button', { class: 'link', onclick: () => { const n = prompt(`Initiative for ${name(c.tokenId)}`, c.initiative); if (n !== null) put(encounter.combatants.map((x) => x === c ? { ...x, initiative: Number(n) } : x)); } }, 'set'), ' ',
+          h('button', { class: 'link', onclick: () => encounter.combatants.length > 1 ? put(encounter.combatants.filter((x) => x !== c)) : run(() => api('DELETE', `/api/scenes/${scene.id}/encounter`)) }, 'remove')]))),
+      gm && h('div', { style: 'display:flex;gap:8px' },
+        h('button', { onclick: () => run(() => api('POST', `/api/scenes/${scene.id}/encounter/next`)) }, 'Next turn'),
+        h('button', { onclick: () => run(() => api('DELETE', `/api/scenes/${scene.id}/encounter`)) }, 'End encounter'))],
+    gm && [h('h3', {}, 'Tokens'), h('ul', {}, tokens.map((t) => h('li', {}, `${t.name} `,
+      h('select', { 'aria-label': `${t.name} visible to`, onchange: (e) => run(() => api('PATCH', `/api/tokens/${t.id}`, { visibility: e.target.value })) }, options(['gm', 'party', 'public'], t.visibility)), ' ',
+      h('button', { class: 'link', onclick: () => confirm(`Delete ${t.name}?`) && run(() => api('DELETE', `/api/tokens/${t.id}`)) }, 'delete'))))]));
+}
+
+function sceneGmTools(v) {
+  const s = v.scene;
+  const players = (state.world.members || []).filter((m) => m.role === 'player');
+  return [
+    h('h3', {}, 'New token'),
+    h('form', { id: 'tokform', onsubmit: (e) => e.preventDefault() },
+      field('Name', h('input', { name: 'name', value: 'Goblin', size: 10 })),
+      field('Colour', h('input', { name: 'color', type: 'color', value: '#b03a2e' })),
+      field('Size', h('input', { name: 'size', type: 'number', min: 1, max: 6, value: 1, size: 2 })),
+      field('Visible to', h('select', { name: 'visibility' }, options(['gm', 'party', 'public'], 'gm'))),
+      field('Controlled by', h('select', { name: 'controller' }, h('option', { value: '' }, 'GM only'), players.map((m) => h('option', { value: m.userId }, m.name)))),
+      h('p', { class: 'muted', style: 'margin:0' }, 'Choose “Place token”, then click the board.')),
+    h('details', {}, h('summary', {}, 'Scene settings'),
+      h('form', { onsubmit: onSubmit(async (f) => {
+          await api('PATCH', `/api/scenes/${s.id}`, { name: f.name, visibility: f.visibility, grid: f.grid, cols: +f.cols, rows: +f.rows, backgroundUrl: f.backgroundUrl, fogEnabled: !!f.fogEnabled });
+        }) },
+        field('Name', h('input', { name: 'name', value: s.name })),
+        field('Shared with', h('select', { name: 'visibility' }, options(['gm', 'party', 'public'], s.visibility))),
+        field('Grid', h('select', { name: 'grid' }, options(['square', 'none'], s.grid))),
+        field('Columns', h('input', { name: 'cols', type: 'number', min: 1, max: 200, value: s.cols, size: 3 })),
+        field('Rows', h('input', { name: 'rows', type: 'number', min: 1, max: 200, value: s.rows, size: 3 })),
+        check('Fog of war', 'fogEnabled', s.fog.enabled),
+        h('label', { style: 'width:100%' }, 'Background image URL', h('input', { name: 'backgroundUrl', type: 'url', value: s.backgroundUrl })),
+        h('button', {}, 'Save scene'))),
+  ];
 }
 
 run(render);

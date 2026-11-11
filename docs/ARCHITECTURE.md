@@ -1,6 +1,6 @@
 # Living Quest — Architecture
 
-Status: design for the whole platform; **implemented: Milestones 1–2 (§3 identity, world, wiki and location/map tables; §5 navigation)** (see `MILESTONES.md`). Everything else here is a design, not code.
+Status: design for the whole platform; **implemented: Milestones 1–3 (§3 identity, world, wiki, location/map, scene/token tables; §5 navigation; the 2D subset of §4; scene sync from §10)** (see `MILESTONES.md`). Everything else here is a design, not code.
 
 ## 1. Architecture diagram
 
@@ -107,7 +107,7 @@ erDiagram
 
 Stable ids: every reference stores an id, never a name. Renaming is a field update (tested in `test/slice.test.js`).
 
-## 4. Shared 2D/3D scene specification
+## 4. Shared 2D/3D scene specification (2D subset implemented)
 
 ```ts
 type Vec3 = [number, number, number];          // metres; y is up; 2D uses y = elevation, plots x/z
@@ -120,6 +120,9 @@ interface Placement { id; entityId; pos: Vec3; rotY: number; scale: number; coll
 interface Zone { id; polygon: Vec3[]; trigger: Interaction[] }
 ```
 - Both renderers read the same `Scene`; neither owns state. A 2D scene is a 3D scene with walls of default height.
+- Implemented now (`tabletop.js`): `scenes` (location, grid square|none, cols, rows, background, visibility, fog {enabled, revealed cells}, encounter {round, turn, combatants sorted by initiative}) and `tokens` (scene, x, y in cells, size, colour, visibility, controlledBy, optional wiki page). Positions are 2D cells for now; adding `z`/rotation is additive.
+- Fog is cell-based and GM-painted; a player sees a token only if its visibility allows and its cell is revealed, or they control it. Walls/line-of-sight come with dynamic lighting later.
+- The 2D renderer is plain SVG in `public/index.html`, not PixiJS: it handles a 200×200 board without a build step. Switch to PixiJS when scenes need thousands of sprites, animated effects or lighting.
 - Line of sight and fog are computed **server-side** from walls; clients receive only revealed placements. Camera mode (top-down, iso, orbit, 3rd, 1st person) is purely a client view and cannot reveal more than the projection sent.
 - 2D→3D conversion: GM traces walls over the floor plan → `Wall[]` with chosen height → editable geometry. Any automated detection only proposes walls.
 
@@ -167,7 +170,8 @@ interface Zone { id; polygon: Vec3[]; trigger: Interaction[] }
 
 ## 10. Realtime communications and streaming
 
-- Realtime game state: WebSocket gateway, one channel per scene; Yjs for collaborative docs (wiki); server-authoritative ops for tokens/dice. Each outbound event goes through projection per recipient role.
+- Realtime game state (implemented): one Server-Sent Events stream per open scene (`GET /api/scenes/:id/stream`); clients send changes as ordinary HTTP requests. After every scene change the server re-projects the full scene for each subscriber's role and pushes it, so a hidden token is never sent. A player who loses access gets `event: gone` and the stream closes. SSE is built into browsers and Node; move to WebSockets when we need high-frequency client→server traffic (live drag previews, cursors) or Yjs.
+- Planned: Yjs for collaborative wiki editing; server-authoritative dice (Milestone 4).
 - Voice/video: LiveKit SFU. Server mints room tokens with grants by role (spectators: subscribe-only, or not in the room at all). GM channel and whispers are separate rooms/data topics.
 - Streaming: v1 = `/broadcast/:campaign` page captured by OBS. v2 = LiveKit Egress → RTMP to the streaming service; large audiences watch via that service's CDN, never the player SFU room.
 - Recording/transcription and any third-party AI call require per-participant consent records before enabling.

@@ -1,9 +1,10 @@
-// Living Quest — server for Milestones 1–2. Node stdlib only.
+// Living Quest — server for Milestones 1–3. Node stdlib only.
 'use strict';
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const tabletop = require('./tabletop.js');
 
 const ADVANCEMENT = ['milestone', 'xp'];
 const AUTONOMY = ['static', 'scheduled', 'reactive', 'simulated', 'ai-assisted'];
@@ -11,7 +12,7 @@ const VISIBILITY = ['gm', 'party', 'public']; // gm: GM only, party: players, pu
 const RANK = { none: 0, spectator: 1, player: 2, gm: 3 };
 const SEES = { gm: VISIBILITY, player: ['party', 'public'], spectator: ['public'], none: [] };
 const COLLECTIONS = ['users', 'worlds', 'campaigns', 'memberships', 'invites', 'locations', 'maps', 'pages',
-  'relationships', 'discoveries', 'revisions', 'events'];
+  'relationships', 'discoveries', 'revisions', 'scenes', 'tokens', 'events'];
 const LINK = /\[\[([^\]|]+)(?:\|[^\]]*)?\]\]/g; // [[id]], [[id|label]] or [[Title]]
 
 const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
@@ -28,6 +29,10 @@ function oneOf(v, list, name) {
 }
 function coord(v, name) {
   if (typeof v !== 'number' || !(v >= 0 && v <= 100)) fail(400, `${name} must be a number 0..100`);
+  return v;
+}
+function num(v, name, min, max, int = false) {
+  if (typeof v !== 'number' || !(v >= min && v <= max) || (int && !Number.isInteger(v))) fail(400, `${name} must be ${int ? 'an integer' : 'a number'} ${min}..${max}`);
   return v;
 }
 function bool(v, name) {
@@ -155,6 +160,7 @@ function createApp({ file } = {}) {
       map: find('maps', loc.mapId),
       ...v.viewPage(find('pages', loc.pageId)),
       children: db.locations.filter((c) => c.parentId === loc.id && v.seesLoc(c)),
+      scenes: table2d.scenesAt(v.role, loc.id),
     };
   }
 
@@ -199,6 +205,8 @@ function createApp({ file } = {}) {
         ...world,
         role,
         campaigns: db.campaigns.filter((c) => c.worldId === p.id && (role === 'gm' || mine.has(c.id))),
+        members: role === 'gm' ? db.memberships.filter((m) => m.worldId === p.id)
+          .map((m) => ({ userId: m.userId, name: find('users', m.userId).name, role: m.role, campaignId: m.campaignId })) : undefined,
       };
     },
     // Empty q lists every page the viewer may see.
@@ -348,6 +356,10 @@ function createApp({ file } = {}) {
     },
   };
 
+  const table2d = tabletop({ db, save, find, fail, need, viewer, record, id, SEES, VISIBILITY,
+    check: { str, oneOf, bool, num, safeUrl } });
+  Object.assign(routes, table2d.routes);
+
   // GM edits for locations and maps: field whitelist. Ids never change, so renames never break links.
   const EDITABLE = {
     locations: { name: (v) => str(v, 'name', 120), visibility: (v) => oneOf(v, VISIBILITY, 'visibility'),
@@ -384,6 +396,9 @@ function createApp({ file } = {}) {
       return res.end(fs.readFileSync(file));
     }
     try {
+      const live = req.method === 'GET' && url.pathname.match(/^\/api\/scenes\/([\w-]+)\/stream$/);
+      // EventSource cannot send headers, so the stream alone accepts the token as a query parameter.
+      if (live) return table2d.stream(req, res, authenticate(req, url.searchParams.get('token')), live[1]);
       const route = table.find((r) => r.method === req.method && r.re.test(url.pathname)) || fail(404, 'no such route');
       const params = { id: url.pathname.match(route.re)[1], q: url.searchParams.get('q') };
       const body = req.method === 'GET' ? {} : await readJson(req);
@@ -396,8 +411,8 @@ function createApp({ file } = {}) {
     }
   }
 
-  function authenticate(req) {
-    const token = (req.headers.authorization || '').replace(/^Bearer /, '');
+  function authenticate(req, query) {
+    const token = query || (req.headers.authorization || '').replace(/^Bearer /, '');
     const h = token && hash(token);
     return (h && db.users.find((u) => u.tokenHash === h)) || fail(401, 'sign in first');
   }

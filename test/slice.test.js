@@ -1,31 +1,11 @@
 // Vertical slice: world → campaign → advancement → town → location → map + wiki → invite → navigate.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const http = require('node:http');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { createApp } = require('../server.js');
-
-async function boot(file) {
-  const server = http.createServer(createApp({ file }).handle);
-  await new Promise((r) => server.listen(0, r));
-  const base = `http://localhost:${server.address().port}`;
-  const call = async (method, url, body, token) => {
-    const res = await fetch(base + url, {
-      method,
-      headers: { 'content-type': 'application/json', ...(token && { authorization: `Bearer ${token}` }) },
-      body: body && JSON.stringify(body),
-    });
-    return { status: res.status, body: await res.json() };
-  };
-  const ok = async (...a) => {
-    const r = await call(...a);
-    assert.equal(r.status, 200, JSON.stringify(r.body));
-    return r.body;
-  };
-  return { server, call, ok };
-}
+const { boot } = require('./helpers.js');
 
 test('vertical slice with server-enforced visibility', async (t) => {
   const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'lq-')), 'data.json');
