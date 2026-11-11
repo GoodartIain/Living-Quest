@@ -1,18 +1,17 @@
-// Living Quest — server for Milestones 1–3. Node stdlib only.
+// Living Quest — server for Milestones 1–3. Node stdlib plus `pg`.
 'use strict';
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const tabletop = require('./tabletop.js');
+const { memoryStore, postgresStore } = require('./store.js');
 
 const ADVANCEMENT = ['milestone', 'xp'];
 const AUTONOMY = ['static', 'scheduled', 'reactive', 'simulated', 'ai-assisted'];
 const VISIBILITY = ['gm', 'party', 'public']; // gm: GM only, party: players, public: players + spectators
 const RANK = { none: 0, spectator: 1, player: 2, gm: 3 };
 const SEES = { gm: VISIBILITY, player: ['party', 'public'], spectator: ['public'], none: [] };
-const COLLECTIONS = ['users', 'worlds', 'campaigns', 'memberships', 'invites', 'locations', 'maps', 'pages',
-  'relationships', 'discoveries', 'revisions', 'scenes', 'tokens', 'events'];
 const LINK = /\[\[([^\]|]+)(?:\|[^\]]*)?\]\]/g; // [[id]], [[id|label]] or [[Title]]
 
 const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
@@ -50,25 +49,12 @@ function safeUrl(v) {
   return u.href;
 }
 
-// shortcut: whole state in one JSON file, rewritten per mutation; move to PostgreSQL (docs/ARCHITECTURE.md §3) before multi-user hosting.
-function openStore(file) {
-  let db = Object.fromEntries(COLLECTIONS.map((c) => [c, []]));
-  if (file && fs.existsSync(file)) db = { ...db, ...JSON.parse(fs.readFileSync(file, 'utf8')) };
-  const save = () => {
-    if (!file) return;
-    fs.writeFileSync(file + '.tmp', JSON.stringify(db));
-    fs.renameSync(file + '.tmp', file); // atomic replace so a crash never leaves half a file
-  };
-  return { db, save };
-}
-
-function createApp({ file } = {}) {
-  const { db, save } = openStore(file);
+function createApp({ store = memoryStore() } = {}) {
+  const { db } = store;
   const find = (c, key) => db[c].find((r) => r.id === key) || fail(404, `${c.slice(0, -1)} not found`);
 
   function record(actor, type, data) {
     db.events.push({ seq: db.events.length + 1, at: new Date().toISOString(), actor, type, data });
-    save();
   }
 
   function roleIn(user, worldId) {
@@ -356,7 +342,7 @@ function createApp({ file } = {}) {
     },
   };
 
-  const table2d = tabletop({ db, save, find, fail, need, viewer, record, id, SEES, VISIBILITY,
+  const table2d = tabletop({ db, find, fail, need, viewer, record, id, SEES, VISIBILITY,
     check: { str, oneOf, bool, num, safeUrl } });
   Object.assign(routes, table2d.routes);
 
@@ -403,8 +389,16 @@ function createApp({ file } = {}) {
       const params = { id: url.pathname.match(route.re)[1], q: url.searchParams.get('q') };
       const body = req.method === 'GET' ? {} : await readJson(req);
       const anonymous = req.method === 'POST' && url.pathname === '/api/users';
+      if (store.reloading) fail(503, 'recovering from a storage error, retry in a moment');
       const user = anonymous ? null : authenticate(req);
-      send(res, 200, route.fn(user, body, params));
+      const generation = store.generation;
+      const out = route.fn(user, body, params);
+      if (req.method !== 'GET') {
+        // Answer only once the change is stored; if storage failed (now or in a write that included it), say so.
+        try { await store.persist(); } catch (e) { console.error('storage write failed:', e.message); }
+        if (store.generation !== generation) fail(500, 'could not save that change, please retry');
+      }
+      send(res, 200, out);
     } catch (e) {
       if (!e.status) console.error(e);
       send(res, e.status || 500, { error: e.status ? e.message : 'internal error' });
@@ -417,7 +411,10 @@ function createApp({ file } = {}) {
     return (h && db.users.find((u) => u.tokenHash === h)) || fail(401, 'sign in first');
   }
 
-  return { handle, db };
+  // After a failed write memory is reloaded; drop live streams so browsers reconnect to the stored state.
+  store.onReload(() => { for (const s of table2d.subscribers) s.res.end(); });
+
+  return { handle, db, store };
 }
 
 function readJson(req) {
@@ -439,9 +436,18 @@ function send(res, status, body) {
 }
 
 if (require.main === module) {
-  const port = Number(process.env.PORT) || 3000;
-  const { handle } = createApp({ file: process.env.DATA_FILE || path.join(__dirname, 'data.json') });
-  http.createServer(handle).listen(port, () => console.log(`Living Quest on http://localhost:${port}`));
+  (async () => {
+    const port = Number(process.env.PORT) || 3000;
+    let store;
+    if (process.env.DATABASE_URL) {
+      store = await postgresStore({ databaseUrl: process.env.DATABASE_URL, importFile: process.env.DATA_FILE || path.join(__dirname, 'data.json') });
+    } else {
+      console.warn('DATABASE_URL is not set: running in memory, nothing will be saved.');
+      store = memoryStore();
+    }
+    const { handle } = createApp({ store });
+    http.createServer(handle).listen(port, () => console.log(`Living Quest on http://localhost:${port}`));
+  })().catch((e) => { console.error(e.message); process.exit(1); });
 }
 
 module.exports = { createApp };

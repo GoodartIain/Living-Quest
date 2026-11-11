@@ -1,10 +1,27 @@
 // Shared test harness: boots the app on a free port and returns small HTTP/SSE clients.
+// With TEST_DATABASE_URL set, each boot gets an empty PostgreSQL schema; otherwise the app runs in memory.
 const assert = require('node:assert/strict');
 const http = require('node:http');
 const { createApp } = require('../server.js');
+const { memoryStore, postgresStore } = require('../store.js');
 
-async function boot(file) {
-  const server = http.createServer(createApp({ file }).handle);
+const DB = process.env.TEST_DATABASE_URL;
+
+async function resetDatabase() {
+  const { Client } = require('pg');
+  const c = new Client({ connectionString: DB });
+  await c.connect();
+  await c.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;');
+  await c.end();
+}
+
+async function boot({ store } = {}) {
+  if (!store) {
+    if (DB) await resetDatabase();
+    store = DB ? await postgresStore({ databaseUrl: DB }) : memoryStore();
+  }
+  const app = createApp({ store });
+  const server = http.createServer(app.handle);
   await new Promise((r) => server.listen(0, r));
   const base = `http://localhost:${server.address().port}`;
   const call = async (method, url, body, token) => {
@@ -47,7 +64,8 @@ async function boot(file) {
     });
     return { status: res.status, msgs, until, close: () => ac.abort() };
   }
-  return { server, call, ok, listen };
+  const close = async () => { server.closeAllConnections(); server.close(); await store.close(); };
+  return { app, server, call, ok, listen, close };
 }
 
-module.exports = { boot };
+module.exports = { boot, DB, resetDatabase };

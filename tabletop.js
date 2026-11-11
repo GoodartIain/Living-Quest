@@ -2,7 +2,7 @@
 // Every push is projected per recipient, so hidden tokens never reach a player's browser.
 'use strict';
 
-module.exports = function tabletop({ db, save, find, fail, need, viewer, record, id, SEES, VISIBILITY, check }) {
+module.exports = function tabletop({ db, find, fail, need, viewer, record, id, SEES, VISIBILITY, check }) {
   const { str, oneOf, bool, num } = check;
   const subscribers = new Set(); // { res, user, sceneId }
   const cell = (t) => `${Math.floor(t.x)},${Math.floor(t.y)}`; // shortcut: a large token counts as its top-left cell for fog; use its footprint when tokens >1 cell matter
@@ -42,9 +42,9 @@ module.exports = function tabletop({ db, save, find, fail, need, viewer, record,
       catch { s.res.end('event: gone\ndata: {}\n\n'); } // access was revoked or the scene hidden: close the stream
     }
   }
-  // Token moves are saved but not logged: the event log is for consequential changes, not every drag.
+  // Token moves are stored but not logged: the event log is for consequential changes, not every drag.
   function changed(scene, actor, type, data) {
-    if (type) record(actor, type, data); else save();
+    if (type) record(actor, type, data);
     publish(scene.id);
   }
   const gmScene = (u, sceneId) => { const s = find('scenes', sceneId); need(u, s.worldId, 'gm'); return s; };

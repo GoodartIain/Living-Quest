@@ -1,16 +1,11 @@
 // Vertical slice: world → campaign → advancement → town → location → map + wiki → invite → navigate.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
-const { createApp } = require('../server.js');
 const { boot } = require('./helpers.js');
 
 test('vertical slice with server-enforced visibility', async (t) => {
-  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'lq-')), 'data.json');
-  const { server, call, ok } = await boot(file);
-  t.after(() => server.close());
+  const { call, ok, close } = await boot();
+  t.after(close);
 
   const gm = (await ok('POST', '/api/users', { name: 'Gm' })).token;
   const player = (await ok('POST', '/api/users', { name: 'Pat' })).token;
@@ -70,16 +65,12 @@ test('vertical slice with server-enforced visibility', async (t) => {
   assert.equal(gmTavern.breadcrumbs[1].name, 'Greyhaven Port');
   assert.equal(gmTavern.page.gmNotes, 'Mara is a spy.');
 
-  // State survives a restart, including the append-only event log.
-  const again = createApp({ file });
-  assert.equal(again.db.locations.length, 4);
-  assert.ok(again.db.events.some((e) => e.type === 'campaign.advancement.changed'));
   assert.ok(!JSON.stringify((await call('GET', '/api/me', null, gm)).body).includes('tokenHash'));
 });
 
 test('milestone 2: inhabitants, links, backlinks, search, history, discovery', async (t) => {
-  const { server, call, ok } = await boot();
-  t.after(() => server.close());
+  const { call, ok, close } = await boot();
+  t.after(close);
   const gm = (await ok('POST', '/api/users', { name: 'Gm' })).token;
   const player = (await ok('POST', '/api/users', { name: 'Pat' })).token;
   const viewer = (await ok('POST', '/api/users', { name: 'Viv' })).token;

@@ -4,9 +4,9 @@ const assert = require('node:assert/strict');
 const { boot } = require('./helpers.js');
 
 test('GM and six players share a live scene', async (t) => {
-  const { server, call, ok, listen } = await boot();
+  const { call, ok, listen, close } = await boot();
   const streams = [];
-  t.after(() => { streams.forEach((s) => s.close()); server.close(); });
+  t.after(() => { streams.forEach((s) => s.close()); return close(); });
   const user = async (name) => (await ok('POST', '/api/users', { name })).token;
   const gm = await user('Gm');
   const world = await ok('POST', '/api/worlds', { name: 'Aster', advancement: 'xp' }, gm);

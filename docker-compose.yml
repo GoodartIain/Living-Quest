@@ -1,0 +1,22 @@
+# Self-hosting: `docker compose up`, then open http://localhost:3000. Data lives in the `db` volume.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: livingquest
+      POSTGRES_PASSWORD: livingquest # change before exposing the database beyond this compose network
+      POSTGRES_DB: livingquest
+    volumes: [db:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "livingquest"]
+      interval: 2s
+      retries: 30
+  app:
+    build: .
+    environment:
+      DATABASE_URL: postgres://livingquest:livingquest@db:5432/livingquest
+    ports: ["3000:3000"]
+    depends_on:
+      db: { condition: service_healthy }
+volumes:
+  db:

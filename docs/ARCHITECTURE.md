@@ -103,7 +103,8 @@ erDiagram
 - **relationships** (from_page, to_page, kind, visibility) · **discoveries** (location, campaign) · **revisions** (page, at, actor, previous title/body/notes)
 - **events** (seq, at, actor, type, data) — append-only; the basis for audit, replay and snapshots.
 - Designed: typed ruleset data on pages (stat blocks), `placements` (page/entity in scene with xyz/rotation — never a copy of the entity), relationship weight + provenance_event, `characters`, `advancement_entries`, `downtime_windows`, `activity_requests`, `npc_state`, `memories` (npc, fact, provenance, scope), `proposals` (status, significance, payload), `snapshots`.
-- Indexes (Postgres): `(world_id, parent_id)` on locations; `(campaign_id, game_time)` on events and activity requests; `GIN` on page tsvector filtered by visibility; `(region_id, next_wake_at)` on npc_state for the simulation queue; GiST on placements for spatial interest management.
+- Implemented schema: `migrations/001_init.sql` (tables above with foreign keys, CHECK constraints for roles/visibility/grid sizes, indexes on the lookups the code does). Migrations are numbered SQL files applied once, in order, inside a transaction, recorded in `schema_migrations`.
+- Planned indexes: `(world_id, parent_id)` on locations (done); `(campaign_id, game_time)` on events and activity requests; `GIN` on page tsvector filtered by visibility; `(region_id, next_wake_at)` on npc_state for the simulation queue; GiST on placements for spatial interest management.
 
 Stable ids: every reference stores an id, never a name. Renaming is a field update (tested in `test/slice.test.js`).
 
@@ -132,7 +133,7 @@ interface Zone { id; polygon: Vec3[]; trigger: Interaction[] }
 - `GET /api/locations/:id` returns `{ role, location, breadcrumbs, map, page, relationships, backlinks, children }` projected for the viewer: hidden children are omitted and `gmNotes` stripped for non-GMs. A location is visible only if it and every ancestor are visible.
 - Discovery: a location with `requiresDiscovery` stays hidden from players and spectators until the GM marks it discovered for one of their campaigns, so campaigns sharing a world keep separate knowledge.
 - Links: GMs write `[[Title]]`; the server stores `[[id]]` (renames never break links) and renders `[[id|Current title]]`, or `[unknown]` when the reader may not see the target. Backlinks and relationships are filtered the same way.
-- Search: `GET /api/worlds/:id/pages?q=` substring match over pages the viewer may see; GM notes are searched only for GMs. Swap for Postgres full-text with the DB move.
+- Search: `GET /api/worlds/:id/pages?q=` substring match over pages the viewer may see; GM notes are searched only for GMs. Still in memory after the PostgreSQL move (the visibility rules live in code); for large worlds, pre-filter candidates with a Postgres full-text index and keep the visibility filter in code.
 - History: every page edit stores the previous version; restore is saving an old version (itself a new revision).
 - Visibility tiers: `gm` < `party` (players) < `public` (players + spectators).
 - Next: knowledge-dependent marker text, links from a pin to scene / NPC / quest / custom action, travel rules that advance the clock.
@@ -178,5 +179,7 @@ interface Zone { id; polygon: Vec3[]; trigger: Interaction[] }
 
 ## 11. Deployment
 
-- Today: `node server.js` (no dependencies), JSON file store. Docker: `node:22-alpine`, copy folder, `CMD node server.js`.
-- Target: Postgres + Redis + MinIO + LiveKit via docker-compose for self-hosting; same images for cloud.
+- Today: `docker compose up` runs the app image (`node:22-alpine`) and PostgreSQL 16. Without Docker: `DATABASE_URL=… npm start`.
+- Storage model (`store.js`): PostgreSQL is the source of truth. On start every table is loaded into memory; route code reads and changes memory; after each changing request the server writes what changed to Postgres in one transaction and only then answers. Writes are queued one at a time. If a write fails, the request gets a 500, memory is reloaded from the database and live scene streams are dropped so browsers reconnect to the stored state.
+- Limits of that model: one app process per database (memory and live streams are per process), and changes are found by comparing rows, which suits up to roughly ten thousand changeable rows. Next steps when needed: explicit per-route writes, then LISTEN/NOTIFY or Redis for several app processes.
+- Target: + Redis + MinIO + LiveKit in the same compose file; same images for cloud.
