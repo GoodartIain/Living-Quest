@@ -1,6 +1,6 @@
 // Milestone 5 UI: campaign chat panel. It lives outside #app, so it stays open and connected while the
 // rest of the page is redrawn (maps, scenes, sheets, wiki). Shares the page's globals (h, api, run, state, token).
-/* global h, api, run, state, token, options */
+/* global h, api, run, state, token, options, voice, showVoiceButton, leaveVoice */
 'use strict';
 
 const chat = { campaignId: null, es: null, role: null, members: [], messages: [], open: false, unread: 0, filter: 'all' };
@@ -12,6 +12,7 @@ function stopChat() {
   Object.assign(chat, { campaignId: null, es: null, messages: [], members: [], unread: 0 });
   $chat.hidden = true;
   $chatToggle.hidden = true;
+  showVoiceButton(false);
   document.body.classList.remove('chat-open');
 }
 
@@ -19,7 +20,9 @@ function startChat(campaignId) {
   if (!campaignId) return stopChat();
   if (chat.campaignId === campaignId && chat.es) return;
   if (chat.es) chat.es.close();
+  leaveVoice(); // a call belongs to one campaign
   Object.assign(chat, { campaignId, messages: [], unread: 0 });
+  api('GET', `/api/campaigns/${campaignId}/voice`).then((v) => { voice.settings = v; showVoiceButton(v.enabled); }).catch(() => showVoiceButton(false));
   const es = new EventSource(`/api/campaigns/${campaignId}/chat/stream?token=${encodeURIComponent(token)}`);
   chat.es = es;
   es.addEventListener('snapshot', (e) => { const d = JSON.parse(e.data); Object.assign(chat, { role: d.role, members: d.members, messages: d.messages }); drawChat(true); });

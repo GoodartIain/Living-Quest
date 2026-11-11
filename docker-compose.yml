@@ -1,4 +1,7 @@
-# Self-hosting: `docker compose up`, then open http://localhost:3000. Data lives in the `db` volume.
+# Self-hosting: copy .env.example to .env and set the LiveKit key/secret, then `docker compose up`
+# and open http://localhost:3000. Data lives in the `db` volume.
+# Voice and video on other machines need HTTPS for the app and WSS for LiveKit (browsers only allow
+# microphones and cameras on secure pages) and the LiveKit ports below open: see docs/DEPLOY.md.
 services:
   db:
     image: postgres:16-alpine
@@ -11,12 +14,29 @@ services:
       test: ["CMD", "pg_isready", "-U", "livingquest"]
       interval: 2s
       retries: 30
+  livekit: # open-source WebRTC media server for the campaign voice/video calls
+    image: livekit/livekit-server:v1.13.11
+    command: --bind 0.0.0.0 --node-ip ${LIVEKIT_NODE_IP:-127.0.0.1}
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY:?set LIVEKIT_API_KEY in .env}: ${LIVEKIT_API_SECRET:?set LIVEKIT_API_SECRET in .env}"
+      LIVEKIT_CONFIG: |
+        port: 7880
+        rtc:
+          tcp_port: 7881
+          port_range_start: 50000
+          port_range_end: 50100
+    ports: ["7880:7880", "7881:7881", "50000-50100:50000-50100/udp"]
   app:
     build: .
     environment:
       DATABASE_URL: postgres://livingquest:livingquest@db:5432/livingquest
+      LIVEKIT_URL: ${LIVEKIT_PUBLIC_URL:-ws://localhost:7880} # what browsers connect to
+      LIVEKIT_API_URL: http://livekit:7880 # how the app reaches LiveKit inside compose
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
     ports: ["3000:3000"]
     depends_on:
       db: { condition: service_healthy }
+      livekit: { condition: service_started }
 volumes:
   db:

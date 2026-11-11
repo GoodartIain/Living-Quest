@@ -44,18 +44,32 @@
   .chat-head { display:flex; justify-content:space-between; align-items:center; gap:8px; }
   .chat-tabs { display:flex; gap:4px; flex-wrap:wrap; } .chat-tabs button { padding:2px 8px; font-size:13px; } .chat-tabs button[aria-selected=false] { background:var(--bg); color:var(--fg); }
   .recipients { border:1px solid var(--line); border-radius:6px; display:flex; flex-wrap:wrap; gap:4px 10px; } .recipients[hidden] { display:none; }
+  #voice { position:fixed; left:16px; bottom:16px; width:min(460px, calc(100vw - 32px)); max-height:70vh; overflow:auto; background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px; z-index:11; box-shadow:0 4px 16px #0003; display:flex; flex-direction:column; gap:8px; }
+  #voice[hidden] { display:none; }
+  #voice .tiles { display:grid; grid-template-columns:repeat(auto-fill, minmax(130px, 1fr)); gap:8px; }
+  #voice .tile { margin:0; border:2px solid var(--line); border-radius:8px; padding:4px; display:flex; flex-direction:column; gap:4px; cursor:pointer; }
+  #voice .tile.focus { grid-column:1 / -1; } #voice .tile.speaking { border-color:#3c9a4a; }
+  #voice .tile video { width:100%; border-radius:6px; background:#000; aspect-ratio:16/9; object-fit:cover; }
+  #voice .avatar { aspect-ratio:16/9; display:grid; place-items:center; font-size:28px; background:var(--bg); border-radius:6px; }
+  #voice figcaption { font-size:13px; } #voice .controls { display:flex; flex-wrap:wrap; gap:6px; align-items:end; }
+  #voice button[aria-pressed=true] { outline:2px solid var(--fg); } #voice-toggle.live { background:#3c9a4a; }
+  @media (max-width: 899px) { #voice { left:0; right:0; bottom:auto; top:56px; width:auto; max-height:45vh; border-radius:0; } }
   @media (min-width: 900px) { body.chat-open main, body.chat-open header, body.chat-open #err { margin-right:340px; } }
   @media (max-width: 899px) { #chat { top:auto; height:60vh; width:auto; left:0; border-left:none; border-top:1px solid var(--line); } }
 </style>
 </head>
 <body>
-<header><h1>Living Quest</h1><button id="chat-toggle" hidden>Chat</button><span id="who" class="muted"></span></header>
+<header><h1>Living Quest</h1><button id="voice-toggle" hidden>Voice</button><button id="chat-toggle" hidden>Chat</button><span id="who" class="muted"></span></header>
 <main id="app"></main>
 <p id="err" class="err" role="alert" style="padding:0 16px"></p>
 <aside id="chat" aria-label="Campaign chat" hidden></aside>
+<aside id="voice" aria-label="Voice and video" hidden></aside>
+<div id="voice-audio" hidden></div>
 <script src="markdown.js"></script>
 <script src="sheet.js"></script>
 <script src="chat.js"></script>
+<script src="vendor/livekit-client.umd.js"></script>
+<script src="voice.js"></script>
 <script>
 const $app = document.getElementById('app');
 let token = localStorage.getItem('lq-token');

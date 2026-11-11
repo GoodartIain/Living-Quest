@@ -8,6 +8,7 @@ const tabletop = require('./tabletop.js');
 const { memoryStore, postgresStore } = require('./store.js');
 const characters = require('./characters.js');
 const chat = require('./chat.js');
+const voice = require('./voice.js');
 
 const ADVANCEMENT = ['milestone', 'xp'];
 const AUTONOMY = ['static', 'scheduled', 'reactive', 'simulated', 'ai-assisted'];
@@ -51,7 +52,7 @@ function safeUrl(v) {
   return u.href;
 }
 
-function createApp({ store = memoryStore() } = {}) {
+function createApp({ store = memoryStore(), env = process.env } = {}) {
   const { db } = store;
   const find = (c, key) => db[c].find((r) => r.id === key) || fail(404, `${c.slice(0, -1)} not found`);
 
@@ -251,6 +252,7 @@ function createApp({ store = memoryStore() } = {}) {
           levelUp: oneOf(b.levelUp ?? 'confirm', ['auto', 'confirm'], 'levelUp'),
           alignLevels: bool(b.alignLevels ?? false, 'alignLevels'),
         },
+        voice: { spectators: 'none', muted: [] },
       };
       db.campaigns.push(campaign);
       record(u.id, 'campaign.created', { campaignId: campaign.id, advancement: campaign.advancement });
@@ -356,7 +358,8 @@ function createApp({ store = memoryStore() } = {}) {
   Object.assign(hooks, { tokenInfo: chars.tokenInfo, sceneRolls: chars.sceneRolls });
   const talk = chat({ db, find, fail, need, record, id, check,
     characterOwner: (u, c) => c.ownerId === u.id || find('worlds', c.worldId).ownerId === u.id });
-  Object.assign(routes, table2d.routes, chars.routes, talk.routes);
+  const calls = voice({ db, find, fail, need, record, check, env });
+  Object.assign(routes, table2d.routes, chars.routes, talk.routes, calls.routes);
 
   // GM edits for locations and maps: field whitelist. Ids never change, so renames never break links.
   const EDITABLE = {
@@ -383,9 +386,15 @@ function createApp({ store = memoryStore() } = {}) {
     return { method, re: new RegExp('^' + pattern.replace(/:id/g, '([\\w-]+)') + '$'), fn };
   });
 
+  const LIVEKIT_CLIENT = path.join(__dirname, 'node_modules', 'livekit-client', 'dist', 'livekit-client.umd.js');
   const STATIC = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8' };
   async function handle(req, res) {
     const url = new URL(req.url, 'http://x');
+    if (req.method === 'GET' && url.pathname === '/vendor/livekit-client.umd.js') { // LiveKit's browser SDK, from node_modules
+      if (!fs.existsSync(LIVEKIT_CLIENT)) return send(res, 404, { error: 'livekit-client is not installed (npm install)' });
+      res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'public, max-age=86400' });
+      return res.end(fs.readFileSync(LIVEKIT_CLIENT));
+    }
     if (req.method === 'GET' && !url.pathname.startsWith('/api/')) {
       const name = path.basename(url.pathname) || 'index.html'; // basename: no path traversal out of public/
       const file = path.join(__dirname, 'public', name);
@@ -406,7 +415,7 @@ function createApp({ store = memoryStore() } = {}) {
       if (store.reloading) fail(503, 'recovering from a storage error, retry in a moment');
       const user = anonymous ? null : authenticate(req);
       const generation = store.generation;
-      const out = route.fn(user, body, params);
+      const out = await route.fn(user, body, params);
       if (req.method !== 'GET') {
         // Answer only once the change is stored; if storage failed (now or in a write that included it), say so.
         try { await store.persist(); } catch (e) { console.error('storage write failed:', e.message); }

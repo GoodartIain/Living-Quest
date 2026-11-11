@@ -15,12 +15,12 @@ async function resetDatabase() {
   await c.end();
 }
 
-async function boot({ store } = {}) {
+async function boot({ store, env = {} } = {}) {
   if (!store) {
     if (DB) await resetDatabase();
     store = DB ? await postgresStore({ databaseUrl: DB }) : memoryStore();
   }
-  const app = createApp({ store });
+  const app = createApp({ store, env });
   const server = http.createServer(app.handle);
   await new Promise((r) => server.listen(0, r));
   const base = `http://localhost:${server.address().port}`;

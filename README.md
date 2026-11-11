@@ -1,6 +1,6 @@
 # Living Quest
 
-Browser tabletop / worldbuilding platform. This repository holds Milestones 1–4: worlds, campaigns, advancement settings, invites, nested maps, a linked wiki (NPCs, factions, lore) with relationships, backlinks, search, history and per-campaign discovery, a live 2D tabletop (tokens, fog of war, measuring, encounters), and characters (guided creation, sheets, server-side dice, XP or milestone levelling linked to tokens), all with server-enforced visibility.
+Browser tabletop / worldbuilding platform. This repository holds Milestones 1–4 and most of 5: worlds, campaigns, advancement settings, invites, nested maps, a linked wiki (NPCs, factions, lore) with relationships, backlinks, search, history and per-campaign discovery, a live 2D tabletop (tokens, fog of war, measuring, encounters), characters (guided creation, sheets, server-side dice, XP or milestone levelling linked to tokens), campaign chat with whispers, and voice/video calls through a self-hosted LiveKit server, all with server-enforced visibility.
 
 ```sh
 docker compose up                      # app + PostgreSQL 16, http://localhost:3000
@@ -18,7 +18,7 @@ TEST_DATABASE_URL=postgres://user:pass@localhost/lq_test npm test  # also the Po
 
 Upgrading from a version that saved to `data.json`: start with `DATABASE_URL` pointing at an empty database and the file is imported once (`DATA_FILE` sets its path).
 
-One dependency: `pg`. Design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Status: [docs/MILESTONES.md](docs/MILESTONES.md).
+Dependencies: `pg` and `livekit-client` (the browser SDK for calls). Voice/video needs a LiveKit server: see [docs/DEPLOY.md](docs/DEPLOY.md). Design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Status: [docs/MILESTONES.md](docs/MILESTONES.md).
 
 ## Licence notice for game rules
 
