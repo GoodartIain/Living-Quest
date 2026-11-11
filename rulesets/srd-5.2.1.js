@@ -328,10 +328,113 @@ function derive(c, level) {
   };
 }
 
+// ---- Level-up choices (subclass, feats/ASI, fighting styles, epic boons) and starting equipment.
+const FEATS = new Map(DATA.feats.map((f) => [f.name, f]));
+const featBase = (n) => n.replace(/ \((Cleric|Druid|Wizard)\)$/, '');
+const hasFeature = (c, level, name) => DATA.classes[c.className].levels.slice(0, level).some((r) => r.features.includes(name));
+
+function requiredChoices(c, level) {
+  const out = [];
+  for (const r of DATA.classes[c.className].levels.slice(0, level)) {
+    if (r.features.includes(`${c.className} Subclass`) && !out.some((x) => x.kind === 'subclass')) out.push({ level: r.level, kind: 'subclass' });
+    if (r.features.includes('Fighting Style')) out.push({ level: r.level, kind: 'fightingStyle' });
+    if (r.features.includes('Ability Score Improvement')) out.push({ level: r.level, kind: 'feat' });
+    if (r.features.includes('Epic Boon')) out.push({ level: r.level, kind: 'boon' });
+  }
+  for (const f of c.subclass ? DATA.classes[c.className].subclass.features : []) {
+    if (f.name === 'Additional Fighting Style' && f.level <= level) out.push({ level: f.level, kind: 'fightingStyle' });
+  }
+  return out;
+}
+const pendingChoices = (c, level) => requiredChoices(c, level).filter((r) => !(c.choices || []).some((x) => x.level === r.level && x.kind === r.kind));
+
+function raise(abilities, increases, allowed, total, cap) {
+  const keys = Object.keys(increases || {});
+  const vals = keys.map((k) => increases[k]);
+  if (!keys.length || keys.some((k) => !allowed.includes(k)) || vals.reduce((a, b) => a + b, 0) !== total || vals.some((v) => !Number.isInteger(v) || v < 1)) {
+    bad(`increase ${total === 1 ? 'one' : 'abilities by a total of 2:'} ${allowed.map((a) => a.toUpperCase()).join('/')}`);
+  }
+  const next = { ...abilities };
+  for (const k of keys) {
+    next[k] += increases[k];
+    if (next[k] > cap) bad(`${k.toUpperCase()} cannot go above ${cap}`);
+  }
+  return next;
+}
+
+// Validates one choice and returns the character fields it changes plus the record to keep.
+function applyChoice(c, level, input) {
+  const want = pendingChoices(c, level).find((r) => r.level === input.level && r.kind === input.kind) || bad(`no ${input.kind} choice is due at level ${input.level}`);
+  const record = { level: want.level, kind: want.kind };
+  const owned = new Set((c.feats || []).map(featBase));
+  if (want.kind === 'subclass') {
+    const sub = DATA.classes[c.className].subclass;
+    if (input.subclass !== sub.name) bad(`the SRD ${c.className} subclass is ${sub.name}`);
+    return { patch: { subclass: sub.name }, record: { ...record, subclass: sub.name } };
+  }
+  const feat = FEATS.get(input.feat) || bad('unknown feat');
+  if (feat.minLevel > level) bad(`${feat.name} needs level ${feat.minLevel}`);
+  if (feat.needsFeature && feat.needsFeature !== 'Fighting Style' && !(feat.needsFeature === 'Spellcasting' && CLASSES[c.className].caster)) bad(`${feat.name} needs the ${feat.needsFeature} feature`);
+  if (want.kind === 'fightingStyle' && feat.type !== 'fighting-style') bad('choose a Fighting Style feat');
+  if (want.kind === 'boon' && feat.type !== 'epic-boon') bad('choose an Epic Boon');
+  if (want.kind === 'feat' && !['general', 'origin', 'fighting-style'].includes(feat.type)) bad('choose a general, origin or fighting style feat');
+  if (feat.type === 'fighting-style' && !hasFeature(c, level, 'Fighting Style')) bad(`${c.className}s have no Fighting Style feature`);
+  let name = feat.name;
+  const patch = {};
+  if (feat.name === 'Magic Initiate') {
+    if (!['Cleric', 'Druid', 'Wizard'].includes(input.list)) bad('Magic Initiate: choose the Cleric, Druid or Wizard list');
+    name = `Magic Initiate (${input.list})`;
+    if ((c.feats || []).includes(name)) bad(`${name} is already taken; choose another list`);
+  } else if (feat.name !== 'Ability Score Improvement' && feat.name !== 'Skilled' && owned.has(feat.name)) bad(`${feat.name} is already taken`);
+  if (feat.name === 'Ability Score Improvement') patch.abilities = raise(c.abilities, input.increases, ABILITIES, 2, 20);
+  if (feat.name === 'Grappler') patch.abilities = raise(c.abilities, input.increases, ['str', 'dex'], 1, 20);
+  if (feat.type === 'epic-boon') patch.abilities = raise(c.abilities, input.increases, ABILITIES, 1, 30);
+  if (feat.name === 'Skilled') { // 2024: three skills or tools; tools are not modelled, so skills only
+    const picks = input.skills;
+    if (!Array.isArray(picks) || picks.length !== 3 || new Set(picks).size !== 3) bad('Skilled: choose three skills');
+    for (const sk of picks) { if (!SKILLS[sk]) bad(`unknown skill ${sk}`); if (c.skills.includes(sk)) bad(`${sk} is already proficient`); }
+    patch.skills = [...c.skills, ...picks];
+  }
+  if (feat.name !== 'Ability Score Improvement') patch.feats = [...(c.feats || []), name];
+  return { patch, record: { ...record, feat: name, ...(input.increases && { increases: input.increases }), ...(patch.skills && { skills: input.skills }) } };
+}
+
+function classFeatures(c, level) {
+  const cls = DATA.classes[c.className];
+  return [...cls.features.filter((f) => f.level <= level),
+    ...(c.subclass ? cls.subclass.features.filter((f) => f.level <= level).map((f) => ({ ...f, subclass: cls.subclass.name })) : [])]
+    .sort((a, b) => a.level - b.level);
+}
+const featInfo = (names) => names.map((n) => ({ name: n, description: (FEATS.get(featBase(n)) || {}).description || '' }));
+
+// Starting equipment: option index per class/background set → inventory, gold, equipped weapons and armour.
+function startingEquipment(c, classPick, backgroundPick) {
+  const items = [];
+  let gp = 0;
+  const take = (sets, pick, label) => {
+    if (pick === undefined || pick === null) return;
+    const set = sets[0];
+    if (!set) return;
+    const opt = set.options[pick] || bad(`${label} equipment: choose option ${set.options.map((_, i) => String.fromCharCode(65 + i)).join(', ')}`);
+    items.push(...opt.items);
+    gp += opt.gp;
+  };
+  take(DATA.classes[c.className].startingEquipment, classPick, c.className);
+  take(DATA.backgrounds[c.background].startingEquipment, backgroundPick, c.background);
+  const cls = CLASSES[c.className];
+  const weapons = items.filter((i) => WEAPONS[i.name]).map((i) => ({ weapon: i.name }));
+  const armor = items.map((i) => i.name).find((n) => DATA.armor[n] && n !== 'Shield' && cls.armor.includes(DATA.armor[n].category)) || null;
+  const shield = items.some((i) => i.name === 'Shield') && cls.armor.includes('shield');
+  return { inventory: items.map((i) => ({ name: i.name, qty: i.count, notes: '' })), gp, weapons, armor, shield };
+}
+
 const options = {
   abilities: ABILITIES, skills: SKILLS, conditions: CONDITIONS, standardArray: STANDARD_ARRAY, pointCost: POINT_COST, points: POINTS, xpThresholds: XP,
-  species: SPECIES, classes: CLASSES, backgrounds: BACKGROUNDS, weapons: WEAPONS, armor: DATA.armor, mastery: DATA.mastery, masteries: DATA.masteries,
+  species: SPECIES, classes: CLASSES, backgrounds: BACKGROUNDS, weapons: WEAPONS, armor: DATA.armor, feats: DATA.feats,
+  subclasses: Object.fromEntries(Object.entries(DATA.classes).map(([k, v]) => [k, { name: v.subclass.name, summary: v.subclass.summary }])),
+  startingEquipment: Object.fromEntries([...Object.entries(DATA.classes), ...Object.entries(DATA.backgrounds)].map(([k, v]) => [k, v.startingEquipment[0] || null])), mastery: DATA.mastery, masteries: DATA.masteries,
   attribution: 'Includes material from the System Reference Document 5.2.1 ("SRD 5.2.1") by Wizards of the Coast LLC, licensed under CC-BY-4.0.',
 };
 
-module.exports = { id: 'srd-5.2.1', options, create, derive, xpLevel, proficiency, MAX_LEVEL, CONDITIONS, SKILLS, ABILITIES, WEAPONS, DATA, masteryCount, spellFormulas, weaponProficient, resolveSpell, SPELLS };
+module.exports = { id: 'srd-5.2.1', options, create, derive, xpLevel, proficiency, MAX_LEVEL, CONDITIONS, SKILLS, ABILITIES, WEAPONS, DATA, masteryCount, spellFormulas, weaponProficient, resolveSpell, SPELLS,
+  pendingChoices, applyChoice, classFeatures, featInfo, startingEquipment };

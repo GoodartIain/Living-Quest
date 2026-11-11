@@ -68,7 +68,7 @@ async function refreshWorld() {
 }
 
 // ---- Guided creation
-const STEPS = ['Basics', 'Species', 'Class', 'Background', 'Abilities', 'Story', 'Review'];
+const STEPS = ['Basics', 'Species', 'Class', 'Background', 'Equipment', 'Abilities', 'Story', 'Review'];
 
 async function startWizard() {
   await loadRules();
@@ -92,7 +92,7 @@ function stepProblem(i, d) {
   if (i === 2 && d.classSkills.length !== cls.skills.count) return `Choose ${cls.skills.count} skills.`;
   if (i === 3 && (d.classSkills.length !== cls.skills.count || (sp.skills && d.speciesSkills.length !== sp.skills.count))) return 'Your new background already grants some of your chosen skills: go back and pick replacements.';
   if (i === 3 && d.bonusMode === '21' && (d.plus2 === d.plus1 || !bg.abilities.includes(d.plus2) || !bg.abilities.includes(d.plus1))) return 'Pick two different abilities from your background.';
-  if (i === 4) {
+  if (i === 5) {
     const v = RULES.abilities.map((a) => d.baseScores[a]);
     if (d.abilityMethod === 'standard' && [...v].sort((a, b) => b - a).join() !== RULES.standardArray.join()) return `Use each of ${RULES.standardArray.join(', ')} once.`;
     if (d.abilityMethod === 'pointbuy') {
@@ -135,6 +135,15 @@ function renderWizard() {
       d.bonusMode === '21' && [field('+2', h('select', { onchange: (e) => { d.plus2 = e.target.value; redraw(); } }, bg.abilities.map((a) => h('option', { value: a, selected: a === d.plus2 || false }, ABIL[a])))),
         field('+1', h('select', { onchange: (e) => { d.plus1 = e.target.value; redraw(); } }, bg.abilities.map((a) => h('option', { value: a, selected: a === d.plus1 || false }, ABIL[a]))))]],
     () => {
+      const pick = (label, key, set) => set && [h('p', {}, h('strong', {}, label)),
+        set.options.map((o, n) => h('label', { class: 'inline', style: 'width:100%;align-items:flex-start' },
+          h('input', { type: 'radio', name: key, checked: d[key] === n || false, onchange: () => { d[key] = n; } }),
+          `${String.fromCharCode(65 + n)}: ${[...o.items.map((it) => `${it.count > 1 ? `${it.count} ` : ''}${it.name}`), o.gp ? `${o.gp} GP` : ''].filter(Boolean).join(', ')}`))];
+      return [pick(`${d.className} equipment`, 'classEquipment', RULES.startingEquipment[d.className]),
+        pick(`${d.background} equipment`, 'backgroundEquipment', RULES.startingEquipment[d.background]),
+        h('p', { class: 'muted' }, 'Weapons and armour you are trained with are equipped; everything goes into the inventory.')];
+    },
+    () => {
       const bonus = bonusOf(d);
       const spent = RULES.abilities.reduce((n, a) => n + (RULES.pointCost[d.baseScores[a]] ?? 0), 0);
       return [field('Method', h('select', { onchange: (e) => { d.abilityMethod = e.target.value;
@@ -173,7 +182,7 @@ function renderWizard() {
           for (let s = 0; s < STEPS.length - 1; s++) { const p = stepProblem(s, d); if (p) { wz.step = s; render(); throw new Error(p); } }
           const r = await api('POST', `/api/campaigns/${d.campaignId}/characters`, { name: d.name, portraitUrl: d.portraitUrl || undefined,
             species: d.species, className: d.className, background: d.background, abilityMethod: d.abilityMethod, baseScores: d.baseScores,
-            backgroundBonus: bonusOf(d), classSkills: d.classSkills, speciesSkills: d.speciesSkills, size: RULES.species[d.species].size === 'Medium or Small' ? d.size || 'Medium' : undefined, personality: d.personality, backstory: d.backstory });
+            backgroundBonus: bonusOf(d), classSkills: d.classSkills, speciesSkills: d.speciesSkills, size: RULES.species[d.species].size === 'Medium or Small' ? d.size || 'Medium' : undefined, classEquipment: d.classEquipment ?? 0, backgroundEquipment: d.backgroundEquipment ?? 0, personality: d.personality, backstory: d.backstory });
           state.wizard = null;
           await loadCharacters();
           await openCharacter(r.character.id);
@@ -400,7 +409,9 @@ function renderSheet() {
       h('div', {}, h('h2', {}, c.name), h('p', { class: 'muted', style: 'margin:0' }, `Level ${v.level} ${c.species} ${c.className} · ${c.background} · ${s.size}`))),
     progress, rollControls()));
 
+  if (v.pendingChoices.length) $app.append(choicesPanel(v));
   $app.append(h('div', { class: 'row' }, attacksSection(c, s), spellsSection(v)));
+  $app.append(featuresSection(v));
   $app.append(h('div', { class: 'row' },
     h('section', {},
       h('h3', {}, `Hit points ${c.hp.current} / ${s.maxHp}${c.hp.temp ? ` (+${c.hp.temp} temp)` : ''}`),
@@ -447,6 +458,47 @@ function renderSheet() {
         field('Reason', h('input', { name: 'reason', required: true })), h('button', {}, 'Award')),
       gm && adv.mode === 'milestone' && h('form', { onsubmit: onSubmit(async (f) => { await api('POST', `/api/campaigns/${c.campaignId}/milestone`, { reason: f.reason, characterIds: [c.id] }); await reloadCharacter(); }) },
         field(`Award ${c.name} a level`, h('input', { name: 'reason', required: true, placeholder: 'Personal quest complete' })), h('button', {}, 'Award level')))));
+}
+
+function choicesPanel(v) {
+  const c = v.character;
+  const send = (body) => run(async () => reloadCharacter(await api('POST', `/api/characters/${c.id}/choices`, body)));
+  const owned = new Set(c.feats.map((f) => f.replace(/ \((Cleric|Druid|Wizard)\)$/, '')));
+  const abil = (name) => h('select', { name }, h('option', { value: '' }, '—'), RULES.abilities.map((a) => h('option', { value: a }, ABIL[a])));
+  const featForm = (ch, types) => {
+    const list = RULES.feats.filter((f) => types.includes(f.type) && f.minLevel <= v.level && (f.name === 'Ability Score Improvement' || f.name === 'Skilled' || f.name === 'Magic Initiate' || !owned.has(f.name))
+      && (f.type !== 'fighting-style' || v.features.some((x) => x.name === 'Fighting Style')));
+    const desc = h('p', { class: 'muted', style: 'white-space:pre-wrap;width:100%' });
+    const show = (name) => { desc.textContent = (list.find((f) => f.name === name) || {}).description || ''; };
+    const form = h('form', { onsubmit: onSubmit((f) => {
+        const increases = {};
+        if (f.a1) increases[f.a1] = (increases[f.a1] || 0) + Number(f.n1);
+        if (f.a2) increases[f.a2] = (increases[f.a2] || 0) + 1;
+        const skills = [f.s1, f.s2, f.s3].filter(Boolean);
+        send({ level: ch.level, kind: ch.kind, feat: f.feat, list: f.list || undefined, increases: Object.keys(increases).length ? increases : undefined, skills: skills.length ? skills : undefined });
+      }) },
+      field('Feat', h('select', { name: 'feat', onchange: (e) => show(e.target.value) }, list.map((f) => h('option', { value: f.name }, f.name)))),
+      ch.kind !== 'fightingStyle' && [field('Increase', abil('a1')), field('by', h('select', { name: 'n1' }, h('option', { value: 2 }, '+2'), h('option', { value: 1 }, '+1'))),
+        field('and +1 to', abil('a2'))],
+      ch.kind === 'feat' && [field('Magic Initiate list', h('select', { name: 'list' }, h('option', { value: '' }, '—'), options(['Cleric', 'Druid', 'Wizard']))),
+        ['s1', 's2', 's3'].map((k) => field('Skilled: skill', h('select', { name: k }, h('option', { value: '' }, '—'), Object.keys(RULES.skills).filter((x) => !c.skills.includes(x)).map((x) => h('option', { value: x }, x)))))],
+      h('button', {}, 'Choose'), desc);
+    show(list[0] && list[0].name);
+    return form;
+  };
+  return h('section', { class: 'note' }, h('h3', {}, 'Level-up choices waiting'),
+    v.pendingChoices.map((ch) => h('div', {}, h('p', {}, h('strong', {}, `Level ${ch.level}: `),
+      { subclass: 'choose your subclass', fightingStyle: 'choose a Fighting Style', feat: 'Ability Score Improvement or another feat', boon: 'choose an Epic Boon' }[ch.kind]),
+      ch.kind === 'subclass'
+        ? [h('p', { class: 'muted' }, RULES.subclasses[c.className].summary), h('button', { onclick: () => send({ level: ch.level, kind: 'subclass', subclass: RULES.subclasses[c.className].name }) }, `Become ${RULES.subclasses[c.className].name}`)]
+        : featForm(ch, ch.kind === 'fightingStyle' ? ['fighting-style'] : ch.kind === 'boon' ? ['epic-boon'] : ['general', 'origin', 'fighting-style']))));
+}
+
+function featuresSection(v) {
+  return h('section', {}, h('h3', {}, `Features${v.character.subclass ? ` · ${v.character.subclass}` : ''}`),
+    v.features.map((f) => h('details', {}, h('summary', {}, `Level ${f.level} · ${f.name}${f.subclass ? ` (${f.subclass})` : ''}`), h('p', { style: 'white-space:pre-wrap' }, f.description))),
+    h('h3', {}, 'Feats'),
+    v.featDetails.map((f) => h('details', {}, h('summary', {}, f.name), h('p', { style: 'white-space:pre-wrap' }, f.description))));
 }
 
 function journalEditor(c) {

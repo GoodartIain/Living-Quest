@@ -458,3 +458,64 @@ test('death saves, hit dice, journal, initiative into the tracker, aligned party
   assert.equal(a2.character.hp.current, a2.sheet.maxHp);
   assert.match(a2.history[0].reason, /party's level/);
 });
+
+test('level-up choices, class features and starting equipment', async (t) => {
+  const { call, ok, close } = await boot();
+  t.after(close);
+  const gm = (await ok('POST', '/api/users', { name: 'Gm' })).token;
+  const world = await ok('POST', '/api/worlds', { name: 'W', advancement: 'milestone' }, gm);
+  const camp = await ok('POST', `/api/worlds/${world.id}/campaigns`, { name: 'C' }, gm);
+  const make = (b) => call('POST', `/api/campaigns/${camp.id}/characters`, b, gm);
+
+  // Starting equipment packages.
+  assert.equal((await make({ ...fighter, name: 'X', classEquipment: 5 })).status, 400);
+  const eqA = (await make({ ...fighter, name: 'Kit', classEquipment: 0, backgroundEquipment: 1 })).body;
+  assert.deepEqual([eqA.character.armor, eqA.sheet.armorClass], ['Chain Mail', 16]);
+  assert.deepEqual(eqA.character.weapons.map((w) => w.weapon), ['Greatsword', 'Flail', 'Javelin']);
+  assert.equal(eqA.character.inventory.find((i) => i.name === 'Javelin').qty, 8);
+  assert.equal(eqA.character.currency.gp, 4 + 50, 'option A gold + Soldier option B (50 GP)');
+  assert.equal((await make({ ...fighter, name: 'Gold', classEquipment: 2 })).body.character.currency.gp, 155);
+
+  const created = (await make({ ...fighter, name: 'Brann' })).body; // STR 17, CON 14
+  const c = created.character;
+  assert.deepEqual(created.pendingChoices, [{ level: 1, kind: 'fightingStyle' }]);
+  assert.ok(created.features.some((f) => f.name === 'Second Wind' && f.description.length > 50));
+  const choose = (b) => call('POST', `/api/characters/${c.id}/choices`, b, gm);
+  const up = async (n) => { for (let i = 0; i < n; i++) await ok('POST', `/api/campaigns/${camp.id}/milestone`, { reason: 'up', characterIds: [c.id] }, gm); };
+  assert.equal((await choose({ level: 1, kind: 'fightingStyle', feat: 'Grappler' })).status, 400);
+  let s = (await choose({ level: 1, kind: 'fightingStyle', feat: 'Archery' })).body;
+  assert.deepEqual([s.pendingChoices, s.character.feats], [[], ['Savage Attacker', 'Archery']]);
+  assert.equal((await choose({ level: 1, kind: 'fightingStyle', feat: 'Defense' })).status, 400, 'already chosen');
+
+  await up(2);
+  assert.equal((await choose({ level: 3, kind: 'subclass', subclass: 'Battle Master' })).status, 400, 'not in the SRD');
+  s = (await choose({ level: 3, kind: 'subclass', subclass: 'Champion' })).body;
+  assert.ok(s.features.some((f) => f.name === 'Improved Critical' && f.subclass === 'Champion'));
+
+  await up(1); // level 4
+  assert.equal((await choose({ level: 4, kind: 'feat', feat: 'Ability Score Improvement', increases: { str: 3 } })).status, 400);
+  assert.equal((await choose({ level: 4, kind: 'feat', feat: 'Boon of Fate', increases: { str: 1 } })).status, 400, 'boons wait for 19');
+  const hpBefore = (await ok('GET', `/api/characters/${c.id}`, null, gm)).sheet.maxHp;
+  s = (await choose({ level: 4, kind: 'feat', feat: 'Ability Score Improvement', increases: { str: 1, con: 1 } })).body;
+  assert.deepEqual([s.character.abilities.str, s.character.abilities.con], [18, 15]);
+  assert.equal(s.sheet.maxHp, hpBefore, 'CON 15 keeps +2');
+  await up(2); // level 6: Fighters get an extra feat
+  assert.equal((await choose({ level: 6, kind: 'feat', feat: 'Skilled', skills: ['Athletics', 'Arcana', 'Stealth'] })).status, 400, 'Athletics already proficient');
+  s = (await choose({ level: 6, kind: 'feat', feat: 'Magic Initiate', list: 'Wizard' })).body;
+  assert.equal(s.sheet.spellcasting.ability, 'int');
+  await up(1); // level 7: Champion's Additional Fighting Style
+  assert.deepEqual((await ok('GET', `/api/characters/${c.id}`, null, gm)).pendingChoices, [{ level: 7, kind: 'fightingStyle' }]);
+  s = (await choose({ level: 7, kind: 'fightingStyle', feat: 'Defense' })).body;
+  await up(1); // level 8
+  s = (await choose({ level: 8, kind: 'feat', feat: 'Ability Score Improvement', increases: { str: 2 } })).body;
+  assert.equal(s.character.abilities.str, 20);
+  await up(4); // level 12
+  assert.equal((await choose({ level: 12, kind: 'feat', feat: 'Ability Score Improvement', increases: { str: 2 } })).status, 400, 'max 20');
+  await choose({ level: 12, kind: 'feat', feat: 'Skilled', skills: ['Arcana', 'Stealth', 'History'] });
+  await up(7); // level 19
+  const pending = (await ok('GET', `/api/characters/${c.id}`, null, gm)).pendingChoices.map((x) => `${x.level}:${x.kind}`);
+  assert.deepEqual(pending, ['14:feat', '16:feat', '19:boon']);
+  s = (await choose({ level: 19, kind: 'boon', feat: 'Boon of Combat Prowess', increases: { str: 1 } })).body;
+  assert.equal(s.character.abilities.str, 21, 'epic boons go to 30');
+  assert.deepEqual(s.character.choices.map((x) => x.kind), ['fightingStyle', 'subclass', 'feat', 'feat', 'fightingStyle', 'feat', 'feat', 'boon']);
+});

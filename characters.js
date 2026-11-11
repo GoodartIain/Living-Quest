@@ -43,6 +43,9 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
       pendingLevels: camp.advancement.mode === 'xp' ? pendingOf(c) : 0,
       advancement: { ...camp.advancement, levelUp: levelUpRule(camp) },
       sheet: rules.derive(c, level),
+      pendingChoices: rules.pendingChoices(c, level),
+      features: rules.classFeatures(c, level),
+      featDetails: rules.featInfo(c.feats),
       spells: spellPreviews(c, rules.derive(c, level).spellcasting),
       history: ledger(c).map((a) => ({ ...a, by: find('users', a.by).name })),
     };
@@ -141,6 +144,10 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
       return { ...base, weapon: rules.WEAPONS[w.weapon] ? w.weapon : fail(400, `unknown weapon ${w.weapon}; choose from the SRD weapon list or define a custom weapon`) };
     });
   }
+  function validInventory(list) {
+    return list.map((it) => ({ id: typeof it.id === 'string' && it.id.length <= 40 ? it.id : id(),
+      name: str(it.name, 'item name', 80), qty: num(it.qty ?? 1, 'quantity', 0, 9999, true), notes: optional(it.notes, 'item notes', 500) }));
+  }
   function validSpells(list) {
     if (!Array.isArray(list) || list.length > 300) fail(400, 'spells must be a list of up to 300');
     return list.map((sp) => {
@@ -202,7 +209,12 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
         personality: optional(b.personality, 'personality', 4000), backstory: optional(b.backstory, 'backstory', 20000),
         ...built, hp: { current: 0, temp: 0 }, conditions: [], inventory: [], currency: { cp: 0, sp: 0, ep: 0, gp: 0, pp: 0 },
         weapons: [], spells: [], slotsUsed: {}, armor: null, shield: false, masteries: [], raging: false,
-        deathSaves: { successes: 0, failures: 0 }, hitDiceUsed: 0, journal: [] };
+        deathSaves: { successes: 0, failures: 0 }, hitDiceUsed: 0, journal: [], choices: [], subclass: null };
+      if (b.classEquipment !== undefined || b.backgroundEquipment !== undefined) { // the A/B/C packages from the SRD
+        const eq = rules.startingEquipment(c, b.classEquipment ?? null, b.backgroundEquipment ?? null);
+        Object.assign(c, { inventory: validInventory(eq.inventory), weapons: validWeapons(eq.weapons), armor: eq.armor, shield: eq.shield });
+        c.currency.gp += eq.gp;
+      }
       c.hp.current = rules.derive(c, 1).maxHp;
       db.characters.push(c);
       joinParty(c, camp, u.id);
@@ -234,8 +246,7 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
       }
       if (b.inventory !== undefined) {
         if (!Array.isArray(b.inventory) || b.inventory.length > 200) fail(400, 'inventory must be a list of up to 200 items');
-        ch.inventory = b.inventory.map((it) => ({ id: typeof it.id === 'string' && it.id.length <= 40 ? it.id : id(),
-          name: str(it.name, 'item name', 80), qty: num(it.qty ?? 1, 'quantity', 0, 9999, true), notes: optional(it.notes, 'item notes', 500) }));
+        ch.inventory = validInventory(b.inventory);
       }
       if (b.weapons !== undefined) ch.weapons = validWeapons(b.weapons);
       if (b.armor !== undefined) ch.armor = b.armor === null ? null : b.armor !== 'Shield' && rules.DATA.armor[b.armor] ? b.armor : fail(400, `armor must be null or one of: ${Object.keys(rules.DATA.armor).filter((x) => x !== 'Shield').join(', ')}`);
@@ -456,6 +467,21 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
       record(u.id, 'character.death-save', { characterId: c.id, roll, after: next });
       sync(c);
       return { ...sheet(c), rolls: [r] };
+    },
+
+    // One level-up choice: { level, kind: 'subclass'|'feat'|'fightingStyle'|'boon', subclass?, feat?, increases?, list?, skills? }.
+    'POST /api/characters/:id/choices': (u, b, p) => {
+      const c = find('characters', p.id);
+      owner(u, c);
+      if (b.classEquipment !== undefined) fail(400, 'starting equipment is chosen when the character is created');
+      const before = maxHpOf(c);
+      const { patch, record: rec } = rules.applyChoice(c, levelOf(c), b);
+      Object.assign(c, patch);
+      c.choices = [...c.choices, { ...rec, at: new Date().toISOString(), by: u.name }];
+      c.hp.current = Math.max(0, c.hp.current + maxHpOf(c) - before); // a CON increase raises HP like a level-up
+      record(u.id, 'character.choice', { characterId: c.id, ...rec });
+      sync(c);
+      return sheet(c);
     },
 
     'POST /api/characters/:id/journal': (u, b, p) => {
