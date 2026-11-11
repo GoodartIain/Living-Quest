@@ -38,9 +38,10 @@ async function boot({ store } = {}) {
     return r.body;
   };
   // Opens a scene's event stream; `until(fn)` resolves with the first message (old or new) that fn accepts.
-  async function listen(sceneId, token) {
+  const listen = (sceneId, token) => listenTo(`/api/scenes/${sceneId}/stream`, token);
+  async function listenTo(path, token) {
     const ac = new AbortController();
-    const res = await fetch(`${base}/api/scenes/${sceneId}/stream?token=${token}`, { signal: ac.signal });
+    const res = await fetch(`${base}${path}?token=${token}`, { signal: ac.signal });
     const msgs = [];
     let wake = () => {};
     if (res.ok) (async () => {
@@ -65,7 +66,7 @@ async function boot({ store } = {}) {
     return { status: res.status, msgs, until, close: () => ac.abort() };
   }
   const close = async () => { server.closeAllConnections(); server.close(); await store.close(); };
-  return { app, server, call, ok, listen, close };
+  return { app, server, call, ok, listen, listenTo, close };
 }
 
 module.exports = { boot, DB, resetDatabase };

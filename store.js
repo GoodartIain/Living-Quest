@@ -25,14 +25,16 @@ const SPEC = {
     'background', 'abilityMethod', 'baseScores', 'backgroundBonus', 'abilities', 'skills', 'feats', 'tools', 'hp', 'conditions', 'inventory', 'currency',
     'weapons', 'spells', 'slotsUsed', 'size', 'armor', 'shield', 'masteries', 'raging', 'deathSaves', 'hitDiceUsed', 'journal', 'choices', 'subclass', 'multiclass'],
   homebrew: ['id', 'worldId', 'kind', 'name', 'data'],
+  messages: ['id', 'worldId', 'campaignId', 'channel', 'fromUserId', 'fromName', 'asCharacter', 'toUserIds', 'toNames', 'text', 'at'],
+  chatDeletions: ['id', 'messageId', 'by', 'at'],
   advancements: ['id', 'worldId', 'campaignId', 'characterId', 'kind', 'amount', 'category', 'reason', 'by', 'auto', 'at'],
   rolls: ['id', 'worldId', 'sceneId', 'userId', 'userName', 'characterId', 'label', 'visibility', 'formula', 'mode', 'total', 'parts', 'at'],
   events: ['seq', 'at', 'actor', 'type', 'data'],
 };
 const COLLECTIONS = Object.keys(SPEC);
 const JSON_FIELDS = new Set(['settings', 'advancement', 'fog', 'encounter', 'controlledBy', 'data', 'baseScores', 'backgroundBonus',
-  'abilities', 'skills', 'feats', 'tools', 'hp', 'conditions', 'inventory', 'currency', 'parts', 'weapons', 'spells', 'slotsUsed', 'masteries', 'deathSaves', 'journal', 'choices', 'multiclass']);
-const APPEND_ONLY = new Set(['events', 'revisions', 'advancements', 'rolls']);
+  'abilities', 'skills', 'feats', 'tools', 'hp', 'conditions', 'inventory', 'currency', 'parts', 'weapons', 'spells', 'slotsUsed', 'masteries', 'deathSaves', 'journal', 'choices', 'multiclass', 'toUserIds', 'toNames']);
+const APPEND_ONLY = new Set(['events', 'revisions', 'advancements', 'rolls', 'messages', 'chatDeletions']);
 const keyOf = (c) => (c === 'events' ? 'seq' : 'id');
 const snake = (f) => f.replace(/[A-Z]/g, (m) => '_' + m.toLowerCase());
 const empty = () => Object.fromEntries(COLLECTIONS.map((c) => [c, []]));
@@ -74,7 +76,7 @@ async function migrate(pool) {
 async function load(pool) {
   const db = empty();
   for (const c of COLLECTIONS) {
-    const { rows } = await pool.query(`SELECT * FROM ${c} ORDER BY ord`);
+    const { rows } = await pool.query(`SELECT * FROM ${snake(c)} ORDER BY ord`);
     db[c] = rows.map((r) => Object.fromEntries(SPEC[c].map((f) => [f, f === 'at' ? r[snake(f)].toISOString() : r[snake(f)]])));
   }
   return upgrade(db);
@@ -105,7 +107,7 @@ async function postgresStore({ databaseUrl, importFile }) {
     const vals = SPEC[c].map((f) => (JSON_FIELDS.has(f) && row[f] != null ? JSON.stringify(row[f]) : row[f] ?? null));
     const key = snake(keyOf(c));
     await client.query(
-      `INSERT INTO ${c} (${cols.join(', ')}) VALUES (${cols.map((_, i) => '$' + (i + 1)).join(', ')})
+      `INSERT INTO ${snake(c)} (${cols.join(', ')}) VALUES (${cols.map((_, i) => '$' + (i + 1)).join(', ')})
        ON CONFLICT (${key}) DO UPDATE SET ${cols.filter((x) => x !== key).map((x) => `${x} = EXCLUDED.${x}`).join(', ')}`, vals);
   }
 
@@ -121,7 +123,7 @@ async function postgresStore({ databaseUrl, importFile }) {
         }
         const live = new Map(db[c].map((r) => [r[keyOf(c)], r]));
         for (const [k, json] of next[c]) if (snap[c].get(k) !== json) await write(client, c, live.get(k));
-        for (const k of snap[c].keys()) if (!next[c].has(k)) await client.query(`DELETE FROM ${c} WHERE ${snake(keyOf(c))} = $1`, [k]);
+        for (const k of snap[c].keys()) if (!next[c].has(k)) await client.query(`DELETE FROM ${snake(c)} WHERE ${snake(keyOf(c))} = $1`, [k]);
       }
       await client.query('COMMIT');
       snap = next;

@@ -7,6 +7,7 @@ const crypto = require('node:crypto');
 const tabletop = require('./tabletop.js');
 const { memoryStore, postgresStore } = require('./store.js');
 const characters = require('./characters.js');
+const chat = require('./chat.js');
 
 const ADVANCEMENT = ['milestone', 'xp'];
 const AUTONOMY = ['static', 'scheduled', 'reactive', 'simulated', 'ai-assisted'];
@@ -353,7 +354,9 @@ function createApp({ store = memoryStore() } = {}) {
   const table2d = tabletop({ db, find, fail, need, viewer, record, id, SEES, VISIBILITY, check, hooks });
   const chars = characters({ db, find, fail, need, record, id, check, publishScene: table2d.publish, canSeeScene: table2d.canSee });
   Object.assign(hooks, { tokenInfo: chars.tokenInfo, sceneRolls: chars.sceneRolls });
-  Object.assign(routes, table2d.routes, chars.routes);
+  const talk = chat({ db, find, fail, need, record, id, check,
+    characterOwner: (u, c) => c.ownerId === u.id || find('worlds', c.worldId).ownerId === u.id });
+  Object.assign(routes, table2d.routes, chars.routes, talk.routes);
 
   // GM edits for locations and maps: field whitelist. Ids never change, so renames never break links.
   const EDITABLE = {
@@ -394,6 +397,8 @@ function createApp({ store = memoryStore() } = {}) {
       const live = req.method === 'GET' && url.pathname.match(/^\/api\/scenes\/([\w-]+)\/stream$/);
       // EventSource cannot send headers, so the stream alone accepts the token as a query parameter.
       if (live) return table2d.stream(req, res, authenticate(req, url.searchParams.get('token')), live[1]);
+      const chatLive = req.method === 'GET' && url.pathname.match(/^\/api\/campaigns\/([\w-]+)\/chat\/stream$/);
+      if (chatLive) return talk.stream(req, res, authenticate(req, url.searchParams.get('token')), chatLive[1]);
       const route = table.find((r) => r.method === req.method && r.re.test(url.pathname)) || fail(404, 'no such route');
       const params = { id: url.pathname.match(route.re)[1], q: url.searchParams.get('q') };
       const body = req.method === 'GET' ? {} : await readJson(req);
@@ -421,7 +426,7 @@ function createApp({ store = memoryStore() } = {}) {
   }
 
   // After a failed write memory is reloaded; drop live streams so browsers reconnect to the stored state.
-  store.onReload(() => { for (const s of table2d.subscribers) s.res.end(); });
+  store.onReload(() => { for (const s of [...table2d.subscribers, ...talk.subscribers]) s.res.end(); });
 
   return { handle, db, store };
 }

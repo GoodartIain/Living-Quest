@@ -42,6 +42,9 @@ test('everything survives a restart exactly', { skip }, async () => {
   await a.ok('POST', `/api/characters/${ch.id}/hp`, { damage: 3 }, pl);
   await a.ok('POST', `/api/scenes/${scene.id}/tokens`, { name: 'x', x: 3, y: 3, characterId: ch.id }, gm);
   await a.ok('POST', `/api/worlds/${w.id}/rolls`, { characterId: ch.id, check: 'skill:Stealth', mode: 'advantage', sceneId: scene.id }, pl);
+  await a.ok('POST', `/api/campaigns/${c.id}/chat`, { channel: 'whisper', toUserIds: [me], text: 'psst' }, gm);
+  const gone = await a.ok('POST', `/api/campaigns/${c.id}/chat`, { channel: 'table', text: 'oops' }, pl);
+  await a.ok('DELETE', `/api/messages/${gone.id}`, null, gm);
   const before = JSON.stringify(a.app.db);
   await a.close();
 
@@ -52,6 +55,7 @@ test('everything survives a restart exactly', { skip }, async () => {
     assert.equal((await b.ok('GET', `/api/scenes/${scene.id}`, null, pl)).tokens[0].x, 5);
     const sheet = await b.ok('GET', `/api/characters/${ch.id}`, null, pl);
     assert.deepEqual([sheet.level, sheet.xp, sheet.history.length], [2, 450, 2]);
+    assert.deepEqual((await b.ok('GET', `/api/campaigns/${c.id}/chat`, null, pl)).messages.map((m) => m.text), ['psst']);
   } finally { await b.close(); }
 });
 
