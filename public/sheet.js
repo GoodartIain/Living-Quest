@@ -181,6 +181,7 @@ function renderWizard() {
 // ---- Sheet
 async function openCharacter(id) {
   await loadRules();
+  if (!state.character || (state.character.character || state.character).id !== id) { state.lastRolls = []; state.lastNote = null; }
   state.character = await api('GET', `/api/characters/${id}`);
   state.wizard = null;
   render();
@@ -196,12 +197,81 @@ function rollControls() {
     field('Roll with', h('select', { name: 'mode' }, options(['normal', 'advantage', 'disadvantage'], 'normal'))),
     field('Show to', h('select', { name: 'visibility' }, h('option', { value: 'public' }, 'everyone'), h('option', { value: 'private' }, 'me and the GM'),
       state.world.role === 'gm' && h('option', { value: 'gm' }, 'GM only'))),
-    h('span', { id: 'lastroll', 'aria-live': 'polite' }, state.lastRoll ? formatRoll(state.lastRoll) : ''));
+    check('Critical hit (double damage dice)', 'crit'),
+    h('span', { id: 'lastroll', 'aria-live': 'polite', style: 'width:100%' }, [state.lastNote, ...(state.lastRolls || []).map(formatRoll)].filter(Boolean).join(' · ')));
 }
-async function rollCheck(c, chk) {
-  const o = Object.fromEntries(new FormData(document.getElementById('rollopts')));
-  state.lastRoll = await api('POST', `/api/worlds/${state.world.id}/rolls`, { characterId: c.id, check: chk, mode: o.mode, visibility: o.visibility });
-  document.getElementById('lastroll').textContent = formatRoll(state.lastRoll);
+const rollOpts = () => Object.fromEntries(new FormData(document.getElementById('rollopts')));
+function showRolls(rolls) {
+  state.lastRolls = rolls;
+  state.lastNote = null;
+  const el = document.getElementById('lastroll');
+  if (el) el.textContent = rolls.map(formatRoll).join(' · ');
+}
+async function rollCheck(c, chk, extra = {}) {
+  const o = rollOpts();
+  const damage = chk.startsWith('damage:');
+  showRolls([await api('POST', `/api/worlds/${state.world.id}/rolls`, { characterId: c.id, check: chk, mode: damage ? 'normal' : o.mode, visibility: o.visibility, crit: damage && !!o.crit, ...extra })]);
+}
+
+function attacksSection(c, s) {
+  const roll = (chk, label, extra) => h('button', { class: 'link', onclick: () => run(() => rollCheck(c, chk, extra)) }, label);
+  const save = (weapons) => run(async () => reloadCharacter(await api('PATCH', `/api/characters/${c.id}`, { weapons })));
+  return h('section', {}, h('h3', {}, 'Attacks'),
+    h('table', { style: 'width:100%;border-collapse:collapse' },
+      h('tr', {}, h('th', { align: 'left' }, 'Weapon'), h('th', {}, 'To hit'), h('th', {}, 'Damage'), h('th', { align: 'left' }, 'Properties'), h('th', {})),
+      s.attacks.map((a) => h('tr', {},
+        h('td', {}, a.name, a.proficient ? '' : h('span', { class: 'muted' }, ' (not proficient)')),
+        h('td', { align: 'center' }, roll(`attack:${a.id}`, signed(a.toHit))),
+        h('td', { align: 'center' }, roll(`damage:${a.id}`, `${a.damage} ${a.type}`),
+          a.versatileDamage && [' · ', roll(`damage:${a.id}`, `${a.versatileDamage} two-handed`, { versatile: true })]),
+        h('td', { class: 'muted' }, a.properties.join(', ')),
+        h('td', {}, a.id !== 'unarmed' && h('button', { class: 'link', onclick: () => save(c.weapons.filter((w) => w.id !== a.id)) }, 'remove'))))),
+    h('form', { onsubmit: onSubmit((f) => save([...c.weapons, { weapon: f.weapon }])) },
+      field('Add a weapon', h('select', { name: 'weapon' }, Object.entries(RULES.weapons).map(([n, w]) => h('option', { value: n }, `${n} (${w.category}, ${w.damage} ${w.type})`)))),
+      h('button', {}, 'Add')));
+}
+
+function spellsSection(c, s) {
+  const sc = s.spellcasting;
+  const used = c.slotsUsed || {};
+  const pips = (n, max) => '●'.repeat(Math.max(0, max - n)) + '○'.repeat(Math.min(n, max));
+  const saveList = (spells) => run(async () => reloadCharacter(await api('PATCH', `/api/characters/${c.id}`, { spells })));
+  const cast = (sp, slotLevel) => run(async () => {
+    const o = rollOpts();
+    const r = await api('POST', `/api/characters/${c.id}/cast`, { spellId: sp.id, slotLevel, mode: o.mode, visibility: o.visibility, crit: !!o.crit });
+    state.lastRolls = r.rolls;
+    state.lastNote = `${c.name} cast ${sp.name}${slotLevel ? ` with a level ${slotLevel} slot` : sc.pact && sp.level ? ' with a pact slot' : ''}.`;
+    await reloadCharacter(r);
+  });
+  const levels = sc ? (sc.pact ? [] : sc.slots.map((max, i) => i + 1)) : [];
+  const spells = [...c.spells].sort((a, b) => a.level - b.level || a.name.localeCompare(b.name));
+  return h('section', {}, h('h3', {}, 'Spellcasting'),
+    !sc ? h('p', { class: 'muted' }, `${c.className}s do not cast spells.`) : [
+      h('p', {}, `${sc.ability.toUpperCase()} · Save DC ${sc.saveDC} · `,
+        h('button', { class: 'link', onclick: () => run(() => rollCheck(c, 'spellattack')) }, `Spell attack ${signed(sc.attackBonus)}`)),
+      sc.pact
+        ? h('p', {}, `Pact slots (level ${sc.pact.level}): `, h('span', { 'aria-label': `${sc.pact.count - (used.pact || 0)} of ${sc.pact.count} left` }, pips(used.pact || 0, sc.pact.count)))
+        : h('p', {}, sc.slots.map((max, i) => h('span', { style: 'margin-right:12px', 'aria-label': `level ${i + 1}: ${max - (used[i + 1] || 0)} of ${max} left` }, `L${i + 1} ${pips(used[i + 1] || 0, max)}`))),
+      spells.length ? h('ul', {}, spells.map((sp) => h('li', {},
+        h('strong', {}, sp.name), ` — ${sp.level ? `level ${sp.level}` : 'cantrip'}`,
+        sp.attack === 'attack' ? ' · spell attack' : sp.attack === 'save' ? ` · ${sp.saveAbility.toUpperCase()} save` : '',
+        sp.damage ? ` · ${sp.damage}${sp.damageType ? ` ${sp.damageType}` : ''}` : '', sp.notes ? h('span', { class: 'muted' }, ` · ${sp.notes}`) : '', ' ',
+        sp.level === 0 || sc.pact
+          ? h('button', { class: 'link', onclick: () => cast(sp) }, 'Cast')
+          : levels.filter((l) => l >= sp.level).map((l) => h('button', { class: 'link', style: 'margin-right:6px', 'aria-label': `Cast ${sp.name} with a level ${l} slot`, onclick: () => cast(sp, l) }, `Cast L${l}`)),
+        ' ', h('button', { class: 'link', onclick: () => saveList(c.spells.filter((x) => x.id !== sp.id)) }, 'remove'))))
+        : h('p', { class: 'muted' }, 'No spells yet. Add the spells your character knows or has prepared from your rulebook.'),
+      h('details', {}, h('summary', {}, 'Add a spell'),
+        h('form', { onsubmit: onSubmit((f) => saveList([...c.spells, { name: f.name, level: +f.level, attack: f.attack, saveAbility: f.attack === 'save' ? f.saveAbility : undefined,
+            damage: f.damage || undefined, damageType: f.damageType, notes: f.notes }])) },
+          field('Name', h('input', { name: 'name', required: true })),
+          field('Level', h('select', { name: 'level' }, h('option', { value: 0 }, 'cantrip'), [1, 2, 3, 4, 5, 6, 7, 8, 9].map((l) => h('option', { value: l }, l)))),
+          field('Resolved by', h('select', { name: 'attack' }, h('option', { value: 'none' }, 'nothing to roll'), h('option', { value: 'attack' }, 'spell attack'), h('option', { value: 'save' }, 'saving throw'))),
+          field('Save', h('select', { name: 'saveAbility' }, options(['str', 'dex', 'con', 'int', 'wis', 'cha'], 'dex'))),
+          field('Damage (optional)', h('input', { name: 'damage', placeholder: '3d6', size: 6 })),
+          field('Type', h('input', { name: 'damageType', placeholder: 'fire', size: 8 })),
+          h('label', { style: 'width:100%' }, 'Notes', h('input', { name: 'notes', placeholder: 'range, duration, higher-level effect…' })),
+          h('button', {}, 'Add spell')))]);
 }
 
 function renderSheet() {
@@ -233,15 +303,17 @@ function renderSheet() {
     h('div', { style: 'display:flex;gap:16px;align-items:center;flex-wrap:wrap' },
       c.portraitUrl && h('img', { src: c.portraitUrl, alt: `Portrait of ${c.name}`, style: 'width:96px;height:96px;object-fit:cover;border-radius:8px' }),
       h('div', {}, h('h2', {}, c.name), h('p', { class: 'muted', style: 'margin:0' }, `Level ${v.level} ${c.species} ${c.className} · ${c.background} · ${s.size}`))),
-    progress));
+    progress, rollControls()));
 
+  $app.append(h('div', { class: 'row' }, attacksSection(c, s), spellsSection(c, s)));
   $app.append(h('div', { class: 'row' },
     h('section', {},
       h('h3', {}, `Hit points ${c.hp.current} / ${s.maxHp}${c.hp.temp ? ` (+${c.hp.temp} temp)` : ''}`),
       h('progress', { max: s.maxHp, value: c.hp.current, 'aria-label': 'Hit points' }), hpForm,
+      h('div', { style: 'display:flex;gap:8px' }, ['short', 'long'].map((k) => h('button', { onclick: () => run(async () =>
+        reloadCharacter(await api('POST', `/api/characters/${c.id}/rest`, { kind: k }))) }, `${k[0].toUpperCase() + k.slice(1)} rest`))),
       h('p', {}, `AC ${s.armorClass} (unarmored) · Speed ${s.speed} ft · Proficiency ${signed(s.proficiencyBonus)} · Passive Perception ${s.passivePerception} · Hit die ${s.hitDie} · `,
         roll('initiative', `Initiative ${signed(s.initiative)}`)),
-      rollControls(),
       h('table', { style: 'width:100%;border-collapse:collapse' },
         h('tr', {}, h('th', { align: 'left' }, 'Ability'), h('th', {}, 'Score'), h('th', {}, 'Check'), h('th', {}, 'Save')),
         Object.keys(s.modifiers).map((a) => h('tr', {},

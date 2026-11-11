@@ -43,6 +43,104 @@ const CLASSES = {
   Wizard: { hitDie: 6, saves: ['int', 'wis'], skills: { count: 2, from: ['Arcana', 'History', 'Insight', 'Investigation', 'Medicine', 'Nature', 'Religion'] } },
 };
 
+// Weapon proficiency: 'martial' = simple and martial; otherwise simple plus martial weapons with one of `martialIf`.
+// caster: 'full' | 'half' | 'pact' with its spellcasting ability.
+const CLASS_EXTRA = {
+  Barbarian: { weapons: 'martial' },
+  Bard: { weapons: 'simple', caster: 'full', castingAbility: 'cha' },
+  Cleric: { weapons: 'simple', caster: 'full', castingAbility: 'wis' },
+  Druid: { weapons: 'simple', caster: 'full', castingAbility: 'wis' },
+  Fighter: { weapons: 'martial' },
+  Monk: { weapons: 'simple', martialIf: ['Light'] },
+  Paladin: { weapons: 'martial', caster: 'half', castingAbility: 'cha' },
+  Ranger: { weapons: 'martial', caster: 'half', castingAbility: 'wis' },
+  Rogue: { weapons: 'simple', martialIf: ['Finesse', 'Light'] },
+  Sorcerer: { weapons: 'simple', caster: 'full', castingAbility: 'cha' },
+  Warlock: { weapons: 'simple', caster: 'pact', castingAbility: 'cha' },
+  Wizard: { weapons: 'simple', caster: 'full', castingAbility: 'int' },
+};
+for (const [k, v] of Object.entries(CLASS_EXTRA)) Object.assign(CLASSES[k], v);
+
+// name: [category, damage, type, properties]. Ranged = has an Ammunition property; thrown melee weapons stay melee.
+const W = (category, damage, type, ...properties) => ({ category, damage, type, properties });
+const WEAPONS = {
+  Club: W('simple melee', '1d4', 'bludgeoning', 'Light'),
+  Dagger: W('simple melee', '1d4', 'piercing', 'Finesse', 'Light', 'Thrown (20/60)'),
+  Greatclub: W('simple melee', '1d8', 'bludgeoning', 'Two-Handed'),
+  Handaxe: W('simple melee', '1d6', 'slashing', 'Light', 'Thrown (20/60)'),
+  Javelin: W('simple melee', '1d6', 'piercing', 'Thrown (30/120)'),
+  'Light Hammer': W('simple melee', '1d4', 'bludgeoning', 'Light', 'Thrown (20/60)'),
+  Mace: W('simple melee', '1d6', 'bludgeoning'),
+  Quarterstaff: W('simple melee', '1d6', 'bludgeoning', 'Versatile (1d8)'),
+  Sickle: W('simple melee', '1d4', 'slashing', 'Light'),
+  Spear: W('simple melee', '1d6', 'piercing', 'Thrown (20/60)', 'Versatile (1d8)'),
+  Dart: W('simple ranged', '1d4', 'piercing', 'Finesse', 'Thrown (20/60)'),
+  'Light Crossbow': W('simple ranged', '1d8', 'piercing', 'Ammunition (80/320)', 'Loading', 'Two-Handed'),
+  Shortbow: W('simple ranged', '1d6', 'piercing', 'Ammunition (80/320)', 'Two-Handed'),
+  Sling: W('simple ranged', '1d4', 'bludgeoning', 'Ammunition (30/120)'),
+  Battleaxe: W('martial melee', '1d8', 'slashing', 'Versatile (1d10)'),
+  Flail: W('martial melee', '1d8', 'bludgeoning'),
+  Glaive: W('martial melee', '1d10', 'slashing', 'Heavy', 'Reach', 'Two-Handed'),
+  Greataxe: W('martial melee', '1d12', 'slashing', 'Heavy', 'Two-Handed'),
+  Greatsword: W('martial melee', '2d6', 'slashing', 'Heavy', 'Two-Handed'),
+  Halberd: W('martial melee', '1d10', 'slashing', 'Heavy', 'Reach', 'Two-Handed'),
+  Lance: W('martial melee', '1d10', 'piercing', 'Heavy', 'Reach', 'Two-Handed (unless mounted)'),
+  Longsword: W('martial melee', '1d8', 'slashing', 'Versatile (1d10)'),
+  Maul: W('martial melee', '2d6', 'bludgeoning', 'Heavy', 'Two-Handed'),
+  Morningstar: W('martial melee', '1d8', 'piercing'),
+  Pike: W('martial melee', '1d10', 'piercing', 'Heavy', 'Reach', 'Two-Handed'),
+  Rapier: W('martial melee', '1d8', 'piercing', 'Finesse'),
+  Scimitar: W('martial melee', '1d6', 'slashing', 'Finesse', 'Light'),
+  Shortsword: W('martial melee', '1d6', 'piercing', 'Finesse', 'Light'),
+  Trident: W('martial melee', '1d8', 'piercing', 'Thrown (20/60)', 'Versatile (1d10)'),
+  Warhammer: W('martial melee', '1d8', 'bludgeoning', 'Versatile (1d10)'),
+  'War Pick': W('martial melee', '1d8', 'piercing', 'Versatile (1d10)'),
+  Whip: W('martial melee', '1d4', 'slashing', 'Finesse', 'Reach'),
+  Blowgun: W('martial ranged', '1', 'piercing', 'Ammunition (25/100)', 'Loading'),
+  'Hand Crossbow': W('martial ranged', '1d6', 'piercing', 'Ammunition (30/120)', 'Light', 'Loading'),
+  'Heavy Crossbow': W('martial ranged', '1d10', 'piercing', 'Ammunition (100/400)', 'Heavy', 'Loading', 'Two-Handed'),
+  Longbow: W('martial ranged', '1d8', 'piercing', 'Ammunition (150/600)', 'Heavy', 'Two-Handed'),
+  Musket: W('martial ranged', '1d12', 'piercing', 'Ammunition (40/120)', 'Loading', 'Two-Handed'),
+  Pistol: W('martial ranged', '1d10', 'piercing', 'Ammunition (30/90)', 'Loading'),
+};
+const has = (w, prop) => w.properties.some((p) => p.startsWith(prop));
+
+// Spell slots per spell level for a full caster at class levels 1..20. Half casters use the row for ceil(level / 2).
+const FULL_SLOTS = [[2], [3], [4, 2], [4, 3], [4, 3, 2], [4, 3, 3], [4, 3, 3, 1], [4, 3, 3, 2], [4, 3, 3, 3, 1], [4, 3, 3, 3, 2],
+  [4, 3, 3, 3, 2, 1], [4, 3, 3, 3, 2, 1], [4, 3, 3, 3, 2, 1, 1], [4, 3, 3, 3, 2, 1, 1], [4, 3, 3, 3, 2, 1, 1, 1], [4, 3, 3, 3, 2, 1, 1, 1],
+  [4, 3, 3, 3, 2, 1, 1, 1, 1], [4, 3, 3, 3, 3, 1, 1, 1, 1], [4, 3, 3, 3, 3, 2, 1, 1, 1], [4, 3, 3, 3, 3, 2, 2, 1, 1]];
+// Warlock Pact Magic: [slots, slot level] at levels 1..20; regained on a short rest.
+const PACT = [[1, 1], [2, 1], [2, 2], [2, 2], [2, 3], [2, 3], [2, 4], [2, 4], [2, 5], [2, 5],
+  [3, 5], [3, 5], [3, 5], [3, 5], [3, 5], [3, 5], [4, 5], [4, 5], [4, 5], [4, 5]];
+
+function spellcasting(c, level, mods, pb) {
+  const cls = CLASSES[c.className];
+  if (!cls.caster) return null;
+  const m = mods[cls.castingAbility];
+  const out = { ability: cls.castingAbility, saveDC: 8 + pb + m, attackBonus: pb + m, slots: [], pact: null };
+  if (cls.caster === 'full') out.slots = FULL_SLOTS[level - 1];
+  if (cls.caster === 'half') out.slots = FULL_SLOTS[Math.ceil(level / 2) - 1];
+  if (cls.caster === 'pact') out.pact = { count: PACT[level - 1][0], level: PACT[level - 1][1] };
+  return out;
+}
+
+function attacks(c, mods, pb) {
+  const cls = CLASSES[c.className];
+  const list = [{ id: 'unarmed', name: 'Unarmed Strike', ability: 'str', toHit: mods.str + pb, damage: `1${signedMod(mods.str)}`, type: 'bludgeoning', properties: [], proficient: true }];
+  for (const w of c.weapons || []) {
+    const d = WEAPONS[w.weapon];
+    const ranged = d.category.endsWith('ranged') && !has(d, 'Thrown');
+    const ability = has(d, 'Finesse') ? (mods.dex > mods.str ? 'dex' : 'str') : ranged ? 'dex' : 'str';
+    const proficient = d.category.startsWith('simple') || cls.weapons === 'martial' || (cls.martialIf || []).some((p) => has(d, p));
+    const versatile = (d.properties.find((p) => p.startsWith('Versatile')) || '').match(/\((.+)\)/);
+    list.push({ id: w.id, name: w.weapon, ability, proficient, toHit: mods[ability] + (proficient ? pb : 0),
+      damage: d.damage + signedMod(mods[ability]), versatileDamage: versatile ? versatile[1] + signedMod(mods[ability]) : null,
+      type: d.type, properties: d.properties });
+  }
+  return list;
+}
+const signedMod = (n) => (n === 0 ? '' : n > 0 ? `+${n}` : String(n));
+
 const BACKGROUNDS = {
   Acolyte: { abilities: ['int', 'wis', 'cha'], skills: ['Insight', 'Religion'], feat: 'Magic Initiate (Cleric)', tool: "Calligrapher's Supplies" },
   Criminal: { abilities: ['dex', 'con', 'int'], skills: ['Sleight of Hand', 'Stealth'], feat: 'Alert', tool: "Thieves' Tools" },
@@ -142,13 +240,15 @@ function derive(c, level) {
     hitDie: `d${cls.hitDie}`,
     maxHp: maxHp(c, level),
     traits: species.traits,
+    attacks: attacks(c, mods, pb),
+    spellcasting: spellcasting(c, level, mods, pb),
   };
 }
 
 const options = {
   abilities: ABILITIES, skills: SKILLS, conditions: CONDITIONS, standardArray: STANDARD_ARRAY, pointCost: POINT_COST, points: POINTS, xpThresholds: XP,
-  species: SPECIES, classes: CLASSES, backgrounds: BACKGROUNDS,
+  species: SPECIES, classes: CLASSES, backgrounds: BACKGROUNDS, weapons: WEAPONS,
   attribution: 'Includes material from the System Reference Document 5.2.1 ("SRD 5.2.1") by Wizards of the Coast LLC, licensed under CC-BY-4.0.',
 };
 
-module.exports = { id: 'srd-5.2.1', options, create, derive, xpLevel, proficiency, MAX_LEVEL, CONDITIONS, SKILLS, ABILITIES };
+module.exports = { id: 'srd-5.2.1', options, create, derive, xpLevel, proficiency, MAX_LEVEL, CONDITIONS, SKILLS, ABILITIES, WEAPONS };

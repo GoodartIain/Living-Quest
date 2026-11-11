@@ -160,3 +160,93 @@ test('XP and milestone advancement, with sheets and tokens in sync', async (t) =
   assert.equal((await call('POST', `/api/worlds/${world.id}/rolls`, { formula: '1d20' }, viv)).status, 403, 'spectators watch, not roll');
   for (const s of [anaLive]) assert.ok(!JSON.stringify(s.msgs).includes(secret.id) && !JSON.stringify(s.msgs).includes(blind.id));
 });
+
+test('attacks and spells: bonuses from the sheet, slots, pact magic, rests', async (t) => {
+  // Rules: proficiency by class, finesse/ranged abilities, slot tables.
+  const rogue = { ...rules.create({ species: 'Human', className: 'Rogue', background: 'Criminal', abilityMethod: 'standard',
+    baseScores: { str: 8, dex: 15, con: 14, int: 13, wis: 12, cha: 10 }, backgroundBonus: { dex: 2, int: 1 },
+    classSkills: ['Acrobatics', 'Deception', 'Insight', 'Perception'], speciesSkills: ['Survival'] }),
+  weapons: [{ id: 'a', weapon: 'Rapier' }, { id: 'b', weapon: 'Longsword' }, { id: 'c', weapon: 'Hand Crossbow' }] };
+  const atk = Object.fromEntries(rules.derive(rogue, 1).attacks.map((a) => [a.name, [a.ability, a.proficient, a.toHit, a.damage]]));
+  assert.deepEqual(atk, {
+    'Unarmed Strike': ['str', true, 1, '1-1'], Rapier: ['dex', true, 5, '1d8+3'],
+    Longsword: ['str', false, -1, '1d8-1'], 'Hand Crossbow': ['dex', true, 5, '1d6+3'] });
+  const sc = (className, level) => rules.derive({ ...rogue, className }, level).spellcasting;
+  assert.equal(sc('Rogue', 5), null);
+  assert.deepEqual(sc('Paladin', 1).slots, [2]);
+  assert.deepEqual(sc('Wizard', 3).slots, [4, 2]);
+  assert.deepEqual(sc('Wizard', 20).slots, [4, 3, 3, 3, 3, 2, 2, 1, 1]);
+  assert.deepEqual(sc('Warlock', 11).pact, { count: 3, level: 5 });
+  assert.deepEqual([sc('Wizard', 1).saveDC, sc('Wizard', 1).attackBonus], [12, 4], 'INT 14 (+2), proficiency +2');
+
+  const { call, ok, close } = await boot();
+  t.after(close);
+  const gm = (await ok('POST', '/api/users', { name: 'Gm' })).token;
+  const ana = (await ok('POST', '/api/users', { name: 'Ana' })).token;
+  const world = await ok('POST', '/api/worlds', { name: 'Aster', advancement: 'milestone' }, gm);
+  const camp = await ok('POST', `/api/worlds/${world.id}/campaigns`, { name: 'C' }, gm);
+  await ok('POST', `/api/invites/${(await ok('POST', `/api/campaigns/${camp.id}/invites`, {}, gm)).code}/accept`, {}, ana);
+  const make = async (b) => (await ok('POST', `/api/campaigns/${camp.id}/characters`, b, ana)).character;
+  const fighterC = await make({ ...fighter, name: 'Brann' });
+  const wiz = await make({ name: 'Ilse', species: 'Gnome', className: 'Wizard', background: 'Sage', abilityMethod: 'standard',
+    baseScores: { str: 8, dex: 14, con: 13, int: 15, wis: 12, cha: 10 }, backgroundBonus: { int: 2, con: 1 }, classSkills: ['Investigation', 'Medicine'] });
+  const lock = await make({ name: 'Vex', species: 'Tiefling', className: 'Warlock', background: 'Acolyte', abilityMethod: 'standard',
+    baseScores: { str: 8, dex: 14, con: 13, int: 12, wis: 10, cha: 15 }, backgroundBonus: { cha: 2, wis: 1 }, classSkills: ['Arcana', 'Deception'] });
+  const roll = (b) => call('POST', `/api/worlds/${world.id}/rolls`, b, ana);
+
+  // Weapons: only SRD weapons; bonuses are computed, never sent by the client.
+  assert.equal((await call('PATCH', `/api/characters/${fighterC.id}`, { weapons: [{ weapon: 'Lightsaber' }] }, ana)).status, 400);
+  const armed = await ok('PATCH', `/api/characters/${fighterC.id}`, { weapons: [{ weapon: 'Longsword' }, { weapon: 'Longbow' }] }, ana);
+  const [sword, bow] = armed.sheet.attacks.slice(1);
+  assert.equal((await roll({ characterId: fighterC.id, check: `attack:${sword.id}` })).body.formula, '1d20+5');
+  assert.equal((await roll({ characterId: fighterC.id, check: `damage:${sword.id}` })).body.formula, '1d8+3');
+  assert.equal((await roll({ characterId: fighterC.id, check: `damage:${sword.id}`, versatile: true })).body.formula, '1d10+3');
+  assert.equal((await roll({ characterId: fighterC.id, check: `damage:${sword.id}`, crit: true })).body.formula, '2d8+3');
+  assert.equal((await roll({ characterId: fighterC.id, check: `attack:${bow.id}` })).body.formula, '1d20+4', 'DEX 14 +2, proficient');
+  assert.equal((await roll({ characterId: fighterC.id, check: `damage:${bow.id}`, versatile: true })).status, 400);
+  assert.equal((await roll({ characterId: fighterC.id, check: 'attack:nope' })).status, 404);
+  assert.equal((await roll({ characterId: fighterC.id, check: 'spellattack' })).status, 409);
+
+  // Spells: validated list; casting spends slots and rolls from the sheet's DC and attack bonus.
+  assert.equal((await call('PATCH', `/api/characters/${wiz.id}`, { spells: [{ name: 'X', level: 10 }] }, ana)).status, 400);
+  assert.equal((await call('PATCH', `/api/characters/${wiz.id}`, { spells: [{ name: 'X', level: 1, damage: '3d' }] }, ana)).status, 400);
+  assert.equal((await call('PATCH', `/api/characters/${wiz.id}`, { spells: [{ name: 'X', level: 1, attack: 'save' }] }, ana)).status, 400, 'save needs an ability');
+  const withSpells = await ok('PATCH', `/api/characters/${wiz.id}`, { spells: [
+    { name: 'Fire Bolt', level: 0, attack: 'attack', damage: '1d10', damageType: 'fire' },
+    { name: 'Burning Hands', level: 1, attack: 'save', saveAbility: 'dex', damage: '3d6', damageType: 'fire' },
+    { name: 'Shield', level: 1 }] }, ana);
+  const [bolt, hands, shield] = withSpells.character.spells;
+  const cast = (c, b) => call('POST', `/api/characters/${c.id}/cast`, b, ana);
+  const b1 = (await cast(wiz, { spellId: bolt.id, crit: true })).body;
+  assert.deepEqual(b1.rolls.map((r) => r.formula), ['1d20+5', '2d10']);
+  assert.deepEqual(b1.character.slotsUsed, {}, 'cantrips are free');
+  const b2 = (await cast(wiz, { spellId: hands.id })).body;
+  assert.match(b2.rolls[0].label, /DC 13 DEX save/);
+  assert.deepEqual(b2.character.slotsUsed, { 1: 1 });
+  assert.equal((await cast(wiz, { spellId: shield.id })).body.rolls.length, 0, 'no roll for a utility spell');
+  assert.equal((await cast(wiz, { spellId: shield.id })).status, 409, 'level 1 wizard has 2 first-level slots');
+  assert.equal((await cast(wiz, { spellId: hands.id, slotLevel: 2 })).status, 409, 'no second-level slots yet');
+  await ok('POST', `/api/campaigns/${camp.id}/milestone`, { reason: 'Up', characterIds: [wiz.id] }, gm);
+  await ok('POST', `/api/campaigns/${camp.id}/milestone`, { reason: 'Up', characterIds: [wiz.id] }, gm);
+  const up = (await cast(wiz, { spellId: hands.id, slotLevel: 2 })).body;
+  assert.match(up.rolls[0].label, /at level 2/);
+  assert.deepEqual(up.character.slotsUsed, { 1: 2, 2: 1 });
+  assert.equal((await cast(fighterC, { spellId: 'x' })).status, 409);
+  const rested = await ok('POST', `/api/characters/${wiz.id}/rest`, { kind: 'long' }, ana);
+  assert.deepEqual(rested.character.slotsUsed, {});
+  assert.equal(rested.character.hp.current, rested.sheet.maxHp);
+
+  // Pact Magic: one level-1 slot at level 1, back on a short rest.
+  const hex = (await ok('PATCH', `/api/characters/${lock.id}`, { spells: [{ name: 'Hex', level: 1 }, { name: 'Darkness', level: 2 }] }, ana)).character.spells;
+  assert.equal((await cast(lock, { spellId: hex[1].id })).status, 409, 'pact slots are level 1');
+  await ok('POST', `/api/characters/${lock.id}/cast`, { spellId: hex[0].id }, ana);
+  assert.equal((await cast(lock, { spellId: hex[0].id })).status, 409);
+  await ok('POST', `/api/characters/${lock.id}/rest`, { kind: 'short' }, ana);
+  await ok('POST', `/api/characters/${lock.id}/cast`, { spellId: hex[0].id }, ana);
+
+  // Only the owner or GM may cast, and a refused cast spends nothing.
+  const other = (await ok('POST', '/api/users', { name: 'Out' })).token;
+  assert.equal((await call('POST', `/api/characters/${wiz.id}/cast`, { spellId: hands.id }, other)).status, 404);
+  assert.equal((await cast(wiz, { spellId: hands.id, sceneId: 'missing' })).status, 404);
+  assert.deepEqual((await ok('GET', `/api/characters/${wiz.id}`, null, ana)).character.slotsUsed, {});
+});

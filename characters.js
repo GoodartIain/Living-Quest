@@ -72,16 +72,55 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
     return ids.map((cid) => all.find((c) => c.id === cid) || fail(400, 'character is not in this campaign'));
   }
 
-  function checkFormula(c, chk) {
+  // Every bonus comes from the sheet, so a player cannot inflate a roll by editing the request.
+  function checkFormula(c, chk, { versatile = false, crit = false } = {}) {
     const s = rules.derive(c, levelOf(c));
     const [kind, what] = String(chk).split(':');
-    let bonus, label;
-    if (kind === 'skill' && s.skills[what] !== undefined) [bonus, label] = [s.skills[what], `${what} check`];
-    else if (kind === 'save' && rules.ABILITIES.includes(what)) [bonus, label] = [s.saves[what], `${what.toUpperCase()} save`];
-    else if (kind === 'ability' && rules.ABILITIES.includes(what)) [bonus, label] = [s.modifiers[what], `${what.toUpperCase()} check`];
-    else if (kind === 'initiative') [bonus, label] = [s.initiative, 'Initiative'];
-    else fail(400, 'check must be skill:<Skill>, save:<ability>, ability:<ability> or initiative');
-    return { formula: `1d20${bonus < 0 ? '-' : '+'}${Math.abs(bonus)}`, label: `${c.name}: ${label}` };
+    const d20 = (bonus, label) => ({ formula: `1d20${bonus < 0 ? '-' : '+'}${Math.abs(bonus)}`, label: `${c.name}: ${label}` });
+    if (kind === 'skill' && s.skills[what] !== undefined) return d20(s.skills[what], `${what} check`);
+    if (kind === 'save' && rules.ABILITIES.includes(what)) return d20(s.saves[what], `${what.toUpperCase()} save`);
+    if (kind === 'ability' && rules.ABILITIES.includes(what)) return d20(s.modifiers[what], `${what.toUpperCase()} check`);
+    if (kind === 'initiative') return d20(s.initiative, 'Initiative');
+    if (kind === 'spellattack') return d20((s.spellcasting || fail(409, `${c.className}s do not cast spells`)).attackBonus, 'spell attack');
+    const atk = (kind === 'attack' || kind === 'damage') && (s.attacks.find((a) => a.id === what) || fail(404, 'no such attack on this character'));
+    if (kind === 'attack') return d20(atk.toHit, `${atk.name} attack${atk.proficient ? '' : ' (not proficient)'}`);
+    if (kind === 'damage') {
+      if (versatile && !atk.versatileDamage) fail(400, `${atk.name} is not versatile`);
+      const f = versatile ? atk.versatileDamage : atk.damage;
+      return { formula: crit ? doubleDice(f) : f, label: `${c.name}: ${atk.name} damage (${atk.type}${versatile ? ', two-handed' : ''}${crit ? ', critical' : ''})` };
+    }
+    fail(400, 'check must be skill:<Skill>, save:<ability>, ability:<ability>, initiative, spellattack, attack:<id> or damage:<id>');
+  }
+  // A critical hit rolls the damage dice twice; modifiers are added once.
+  const doubleDice = (f) => f.replace(/(\d*)d(\d+)/g, (_, n, m) => `${2 * (Number(n) || 1)}d${m}`);
+
+  function makeRoll(u, worldId, { formula, label = '', mode = 'normal', visibility = 'public', sceneId = null, characterId = null }) {
+    if (sceneId != null) {
+      const sc = find('scenes', sceneId);
+      if (sc.worldId !== worldId || !canSeeScene(u, sc)) fail(404, 'scene not found');
+    }
+    const result = dice.roll(str(formula, 'formula', 100), mode);
+    const r = { id: id(), worldId, sceneId: sceneId ?? null, userId: u.id, userName: u.name, characterId, label: label.slice(0, 120), visibility, ...result, at: new Date().toISOString() };
+    db.rolls.push(r);
+    if (r.sceneId) publishScene(r.sceneId);
+    return r;
+  }
+
+  function validWeapons(list) {
+    if (!Array.isArray(list) || list.length > 20) fail(400, 'weapons must be a list of up to 20');
+    return list.map((w) => ({ id: typeof w.id === 'string' && w.id.length <= 40 && w.id !== 'unarmed' ? w.id : id(),
+      weapon: rules.WEAPONS[w.weapon] ? w.weapon : fail(400, `unknown weapon ${w.weapon}; choose from the SRD weapon list`) }));
+  }
+  function validSpells(list) {
+    if (!Array.isArray(list) || list.length > 300) fail(400, 'spells must be a list of up to 300');
+    return list.map((sp) => {
+      const attack = oneOf(sp.attack ?? 'none', ['none', 'attack', 'save'], 'spell attack');
+      const damage = sp.damage ? str(sp.damage, 'spell damage', 60) : '';
+      if (damage) dice.parse(damage); // reject formulas that could not be rolled later
+      return { id: typeof sp.id === 'string' && sp.id.length <= 40 ? sp.id : id(), name: str(sp.name, 'spell name', 80),
+        level: num(sp.level ?? 0, 'spell level', 0, 9, true), attack, saveAbility: attack === 'save' ? oneOf(sp.saveAbility, rules.ABILITIES, 'save ability') : null,
+        damage, damageType: optional(sp.damageType, 'damage type', 30), prepared: sp.prepared !== false, notes: optional(sp.notes, 'spell notes', 2000) };
+    });
   }
 
   // public: everyone in the world; private: the roller and the GM; gm: GM only (GM rolls behind the screen).
@@ -106,7 +145,8 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
       const c = { id: id(), worldId: camp.worldId, campaignId: camp.id, ownerId, ruleset: rules.id,
         name: str(b.name, 'name', 80), portraitUrl: b.portraitUrl ? safeUrl(b.portraitUrl) : '',
         personality: optional(b.personality, 'personality', 4000), backstory: optional(b.backstory, 'backstory', 20000),
-        ...built, hp: { current: 0, temp: 0 }, conditions: [], inventory: [], currency: { cp: 0, sp: 0, ep: 0, gp: 0, pp: 0 } };
+        ...built, hp: { current: 0, temp: 0 }, conditions: [], inventory: [], currency: { cp: 0, sp: 0, ep: 0, gp: 0, pp: 0 },
+        weapons: [], spells: [], slotsUsed: {} };
       c.hp.current = rules.derive(c, 1).maxHp;
       db.characters.push(c);
       record(u.id, 'character.created', { characterId: c.id, campaignId: camp.id, ownerId });
@@ -140,6 +180,8 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
         ch.inventory = b.inventory.map((it) => ({ id: typeof it.id === 'string' && it.id.length <= 40 ? it.id : id(),
           name: str(it.name, 'item name', 80), qty: num(it.qty ?? 1, 'quantity', 0, 9999, true), notes: optional(it.notes, 'item notes', 500) }));
       }
+      if (b.weapons !== undefined) ch.weapons = validWeapons(b.weapons);
+      if (b.spells !== undefined) ch.spells = validSpells(b.spells);
       if (b.currency !== undefined) ch.currency = Object.fromEntries(COINS.map((k) => [k, num(b.currency[k] ?? 0, k, 0, 1e9, true)]));
       if (!Object.keys(ch).length) fail(400, 'nothing to change');
       Object.assign(c, ch);
@@ -224,18 +266,65 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
       }
       if (b.check !== undefined) {
         if (!c) fail(400, 'a check needs a characterId');
-        ({ formula, label } = checkFormula(c, b.check));
+        ({ formula, label } = checkFormula(c, b.check, { versatile: b.versatile === true, crit: b.crit === true }));
       }
-      if (b.sceneId != null) {
-        const s = find('scenes', b.sceneId);
-        if (s.worldId !== p.id || !canSeeScene(u, s)) fail(404, 'scene not found');
+      return makeRoll(u, p.id, { formula, label, mode, visibility, sceneId: b.sceneId, characterId: c && c.id });
+    },
+
+    // Spends the slot, then rolls what the spell defines: a spell attack, damage, or damage against a save DC.
+    'POST /api/characters/:id/cast': (u, b, p) => {
+      const c = find('characters', p.id);
+      owner(u, c);
+      const role = need(u, c.worldId, 'player');
+      const s = rules.derive(c, levelOf(c));
+      const casting = s.spellcasting || fail(409, `${c.className}s do not cast spells`);
+      const spell = c.spells.find((x) => x.id === b.spellId) || fail(404, 'spell not on this character');
+      if (b.sceneId != null) { // checked before any slot is spent, so a refused cast changes nothing
+        const sc = find('scenes', b.sceneId);
+        if (sc.worldId !== c.worldId || !canSeeScene(u, sc)) fail(404, 'scene not found');
       }
-      const result = dice.roll(str(formula, 'formula', 100), mode);
-      const r = { id: id(), worldId: p.id, sceneId: b.sceneId ?? null, userId: u.id, userName: u.name, characterId: c ? c.id : null,
-        label, visibility, ...result, at: new Date().toISOString() };
-      db.rolls.push(r);
-      if (r.sceneId) publishScene(r.sceneId);
-      return r;
+      const visibility = oneOf(b.visibility ?? 'public', ['public', 'private', 'gm'], 'visibility');
+      if (visibility === 'gm' && role !== 'gm') fail(403, 'only the GM can roll behind the screen');
+      let slotLevel = 0;
+      const used = { ...c.slotsUsed };
+      if (spell.level > 0) {
+        if (casting.pact) { // Pact Magic: every slot is the same level
+          if (spell.level > casting.pact.level) fail(409, `pact slots are level ${casting.pact.level}`);
+          if ((used.pact || 0) >= casting.pact.count) fail(409, 'no pact slots left; they return on a short rest');
+          slotLevel = casting.pact.level;
+          used.pact = (used.pact || 0) + 1;
+        } else {
+          slotLevel = num(b.slotLevel ?? spell.level, 'slotLevel', spell.level, 9, true);
+          const max = casting.slots[slotLevel - 1] || 0;
+          if ((used[slotLevel] || 0) >= max) fail(409, max ? `no level ${slotLevel} slots left` : `no level ${slotLevel} slots at this level`);
+          used[slotLevel] = (used[slotLevel] || 0) + 1;
+        }
+      }
+      c.slotsUsed = used;
+      const at = slotLevel > spell.level ? ` at level ${slotLevel}` : '';
+      const mode = oneOf(b.mode ?? 'normal', ['normal', 'advantage', 'disadvantage'], 'mode');
+      const common = { visibility, sceneId: b.sceneId, characterId: c.id };
+      const rolls = [];
+      if (spell.attack === 'attack') rolls.push(makeRoll(u, c.worldId, { ...common, mode, formula: `1d20${casting.attackBonus < 0 ? '-' : '+'}${Math.abs(casting.attackBonus)}`, label: `${c.name} casts ${spell.name}${at}: spell attack` }));
+      if (spell.damage) {
+        const save = spell.attack === 'save' ? `, DC ${casting.saveDC} ${spell.saveAbility.toUpperCase()} save` : '';
+        rolls.push(makeRoll(u, c.worldId, { ...common, formula: b.crit === true ? doubleDice(spell.damage) : spell.damage,
+          label: `${c.name} casts ${spell.name}${at}: damage${spell.damageType ? ` (${spell.damageType})` : ''}${save}${b.crit === true ? ', critical' : ''}` }));
+      }
+      record(u.id, 'spell.cast', { characterId: c.id, spell: spell.name, spellLevel: spell.level, slotLevel });
+      return { ...sheet(c), rolls };
+    },
+
+    // Long rest: full HP, no temp HP, all slots back. Short rest: Pact Magic slots back (hit dice are not modelled yet).
+    'POST /api/characters/:id/rest': (u, b, p) => {
+      const c = find('characters', p.id);
+      owner(u, c);
+      const kind = oneOf(b.kind, ['short', 'long'], 'kind');
+      if (kind === 'long') { c.hp = { current: maxHpOf(c), temp: 0 }; c.slotsUsed = {}; }
+      else { const { pact, ...rest } = c.slotsUsed; c.slotsUsed = rest; }
+      record(u.id, `character.rest.${kind}`, { characterId: c.id });
+      sync(c);
+      return sheet(c);
     },
 
     'GET /api/worlds/:id/rolls': (u, _b, p) => {
