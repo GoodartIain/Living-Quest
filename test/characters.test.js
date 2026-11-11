@@ -366,3 +366,95 @@ test('SRD spell catalogue: scaling, healing, prepared limits, Magic Initiate', a
   const soldier = await make({ ...fighter, name: 'Plain' }); // Soldier: no Magic Initiate
   assert.equal((await patch(soldier, { spells: [{ srd: 'Light' }] })).status, 409);
 });
+
+test('death saves, hit dice, journal, initiative into the tracker, aligned party levels', async (t) => {
+  const { call, ok, close } = await boot();
+  t.after(close);
+  const gm = (await ok('POST', '/api/users', { name: 'Gm' })).token;
+  const pat = (await ok('POST', '/api/users', { name: 'Pat' })).token;
+  const ana = (await ok('POST', '/api/users', { name: 'Ana' })).token;
+  const world = await ok('POST', '/api/worlds', { name: 'W', advancement: 'milestone' }, gm);
+  const camp = await ok('POST', `/api/worlds/${world.id}/campaigns`, { name: 'C' }, gm);
+  for (const tok of [pat, ana]) await ok('POST', `/api/invites/${(await ok('POST', `/api/campaigns/${camp.id}/invites`, {}, gm)).code}/accept`, {}, tok);
+  const brann = (await ok('POST', `/api/campaigns/${camp.id}/characters`, { ...fighter, name: 'Brann' }, pat)).character; // 13 HP, d10, CON +2
+  const hp = (b, tok = pat) => call('POST', `/api/characters/${brann.id}/hp`, b, tok);
+
+  // Hit Point Dice on a short rest.
+  await hp({ damage: 8 });
+  const rest = (await call('POST', `/api/characters/${brann.id}/rest`, { kind: 'short', hitDice: 1 }, pat)).body;
+  assert.equal(rest.rolls[0].formula, '1d10+2');
+  assert.equal(rest.character.hp.current, Math.min(13, 5 + rest.rolls[0].total));
+  assert.equal(rest.character.hitDiceUsed, 1);
+  assert.equal((await call('POST', `/api/characters/${brann.id}/rest`, { kind: 'short', hitDice: 1 }, pat)).status, 400, 'level 1: one die');
+  assert.equal((await ok('POST', `/api/characters/${brann.id}/rest`, { kind: 'long' }, pat)).character.hitDiceUsed, 0);
+
+  // Dropping to 0 HP, failing by damage, recovering by healing.
+  assert.equal((await call('POST', `/api/characters/${brann.id}/death-save`, null, pat)).status, 409, 'not dying');
+  let s = (await hp({ damage: 13 })).body.character;
+  assert.deepEqual([s.hp.current, s.conditions.includes('Unconscious')], [0, true]);
+  s = (await hp({ damage: 1 })).body.character;
+  assert.equal(s.deathSaves.failures, 1);
+  s = (await hp({ damage: 1, critical: true })).body.character;
+  assert.equal(s.deathSaves.failures, 3);
+  assert.equal(s.deathSaves.dead, true);
+  assert.equal((await hp({ heal: 5 })).status, 409, 'dead');
+  // A second character: heal from 0 clears saves; then roll until stable, dead or back up.
+  const ilse = (await ok('POST', `/api/campaigns/${camp.id}/characters`, { ...fighter, name: 'Ilse' }, ana)).character;
+  const hp2 = (b) => call('POST', `/api/characters/${ilse.id}/hp`, b, ana);
+  await hp2({ damage: 13 }); await hp2({ damage: 1 });
+  s = (await hp2({ heal: 2 })).body.character;
+  assert.deepEqual([s.hp.current, s.deathSaves, s.conditions.includes('Unconscious')], [2, { successes: 0, failures: 0 }, false]);
+  assert.equal((await hp2({ damage: 30 })).body.character.deathSaves.dead, true, 'massive damage: 28 over 0 ≥ max HP 13');
+  const third = (await ok('POST', `/api/campaigns/${camp.id}/characters`, { ...fighter, name: 'Third' }, ana)).character;
+  await call('POST', `/api/characters/${third.id}/hp`, { damage: 13 }, ana);
+  let last;
+  for (let i = 0; i < 10; i++) {
+    const r = await call('POST', `/api/characters/${third.id}/death-save`, null, ana);
+    if (r.status === 409) break;
+    last = r.body;
+    const ds = last.character.deathSaves;
+    assert.equal(last.rolls[0].formula, '1d20');
+    if (ds.stable || ds.dead || last.character.hp.current === 1) break;
+  }
+  const ds = last.character.deathSaves;
+  assert.ok(ds.stable ? ds.successes === 3 : ds.dead ? ds.failures === 3 : last.character.hp.current === 1, JSON.stringify(ds));
+
+  // Journal: private entries stay with owner and GM; party entries are shared.
+  await ok('POST', `/api/characters/${ilse.id}/journal`, { text: 'I took the ring.', visibility: 'private' }, ana);
+  const j = await ok('POST', `/api/characters/${ilse.id}/journal`, { text: 'We camped by the river.', visibility: 'party' }, ana);
+  assert.equal(j.character.journal.length, 2);
+  assert.deepEqual((await ok('GET', `/api/characters/${ilse.id}`, null, pat)).journal.map((e) => e.text), ['We camped by the river.']);
+  assert.equal((await ok('GET', `/api/characters/${ilse.id}`, null, gm)).character.journal.length, 2);
+  assert.equal((await call('DELETE', `/api/journal-entries/${j.character.journal[0].id}`, null, pat)).status, 403);
+  assert.equal((await ok('DELETE', `/api/journal-entries/${j.character.journal[0].id}`, null, ana)).character.journal.length, 1);
+
+  // Initiative into the encounter tracker.
+  const town = await ok('POST', `/api/locations/${world.rootLocationId}/children`, { name: 'T', x: 1, y: 1 }, gm);
+  const scene = await ok('POST', `/api/locations/${town.id}/scenes`, { name: 'S', visibility: 'party' }, gm);
+  const fresh = (await ok('POST', `/api/campaigns/${camp.id}/characters`, { ...fighter, name: 'Runa' }, pat)).character;
+  const tokA = await ok('POST', `/api/scenes/${scene.id}/tokens`, { name: 'x', x: 1, y: 1, characterId: fresh.id }, gm);
+  const gob = await ok('POST', `/api/scenes/${scene.id}/tokens`, { name: 'Goblin', x: 2, y: 2, visibility: 'gm' }, gm);
+  const initiative = (b, tok) => call('POST', `/api/scenes/${scene.id}/encounter/initiative`, b, tok);
+  assert.equal((await initiative({ tokenId: tokA.id }, pat)).status, 409, 'no encounter yet');
+  await ok('PUT', `/api/scenes/${scene.id}/encounter`, { combatants: [{ tokenId: tokA.id, initiative: 0 }, { tokenId: gob.id, initiative: 0 }] }, gm);
+  const ir = (await initiative({ tokenId: tokA.id }, pat)).body;
+  assert.equal(ir.formula, '1d20+2', 'DEX +2 from the sheet');
+  assert.equal((await initiative({ tokenId: gob.id }, pat)).status, 403);
+  const gr = (await initiative({ tokenId: gob.id, bonus: 2 }, gm)).body;
+  assert.equal(gr.visibility, 'gm', "a hidden monster's roll stays hidden");
+  const enc = (await ok('GET', `/api/scenes/${scene.id}`, null, gm)).encounter;
+  assert.deepEqual(enc.combatants.map((x) => x.initiative), [ir.total, gr.total].sort((a, b) => b - a));
+  assert.ok(!(await ok('GET', `/api/worlds/${world.id}/rolls`, null, pat)).some((r) => r.id === gr.id));
+
+  // Aligned party levels: whole-party awards only, newcomers join at the party's level.
+  const aligned = await ok('POST', `/api/worlds/${world.id}/campaigns`, { name: 'Aligned', alignLevels: true }, gm);
+  const join = async (tok) => ok('POST', `/api/invites/${(await ok('POST', `/api/campaigns/${aligned.id}/invites`, {}, gm)).code}/accept`, {}, tok);
+  await join(pat); await join(ana);
+  const a1 = (await ok('POST', `/api/campaigns/${aligned.id}/characters`, { ...fighter, name: 'A1' }, pat)).character;
+  await ok('POST', `/api/campaigns/${aligned.id}/milestone`, { reason: 'Chapter 1' }, gm);
+  assert.equal((await call('POST', `/api/campaigns/${aligned.id}/milestone`, { reason: 'x', characterIds: [a1.id] }, gm)).status, 409);
+  const a2 = await ok('POST', `/api/campaigns/${aligned.id}/characters`, { ...fighter, name: 'A2' }, ana);
+  assert.equal(a2.level, 2);
+  assert.equal(a2.character.hp.current, a2.sheet.maxHp);
+  assert.match(a2.history[0].reason, /party's level/);
+});

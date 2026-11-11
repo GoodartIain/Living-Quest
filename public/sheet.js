@@ -44,10 +44,11 @@ function charactersPanel() {
 function advancementForm(c) {
   const a = c.advancement;
   return h('details', {}, h('summary', {}, `Advancement · ${c.name} (${a.mode === 'xp' ? 'XP' : 'milestone'})`),
-    h('form', { onsubmit: onSubmit(async (f) => { await api('PATCH', `/api/campaigns/${c.id}/advancement`, { levelUp: f.levelUp }); await refreshWorld(); }) },
+    h('form', { onsubmit: onSubmit(async (f) => { await api('PATCH', `/api/campaigns/${c.id}/advancement`, { levelUp: f.levelUp, alignLevels: !!f.alignLevels }); await refreshWorld(); }) },
       field('When XP reaches a new level', h('select', { name: 'levelUp' },
         h('option', { value: 'confirm', selected: a.levelUp !== 'auto' || false }, 'GM approves each level'),
         h('option', { value: 'auto', selected: a.levelUp === 'auto' || false }, 'Level up automatically'))),
+      check('Keep party levels aligned (whole-party awards; new characters join at the party level)', 'alignLevels', a.alignLevels),
       h('button', {}, 'Save')),
     a.mode === 'xp'
       ? h('form', { onsubmit: onSubmit(async (f, form) => { await api('POST', `/api/campaigns/${c.id}/xp`, { amount: +f.amount, category: f.category, reason: f.reason }); form.reset(); await refreshWorld(); }) },
@@ -365,16 +366,26 @@ function renderSheet() {
     return $app.append(h('section', {}, back, h('h2', {}, v.name),
       v.portraitUrl && h('img', { src: v.portraitUrl, alt: `Portrait of ${v.name}`, style: 'max-width:160px;border-radius:8px' }),
       h('p', {}, `Level ${v.level} ${v.species} ${v.className} · played by ${v.ownerName}`),
-      v.conditions.length > 0 && h('p', {}, `Conditions: ${v.conditions.join(', ')}`)));
+      v.conditions.length > 0 && h('p', {}, `Conditions: ${v.conditions.join(', ')}`),
+      v.journal.length > 0 && [h('h3', {}, 'Shared journal'), h('ul', {}, [...v.journal].reverse().map((e) => h('li', {}, h('span', { class: 'muted' }, `${new Date(e.at).toLocaleDateString()} · `), e.text)))]));
   }
   const c = v.character, s = v.sheet, adv = v.advancement;
   const roll = (chk, label) => h('button', { class: 'link', onclick: () => run(() => rollCheck(c, chk)), 'aria-label': `Roll ${label}` }, label);
   const hpForm = h('form', { onsubmit: (e) => e.preventDefault() },
     field('Amount', h('input', { name: 'n', type: 'number', min: 0, max: 10000, value: 1, size: 4 })),
     ['damage', 'heal', 'temp'].map((k) => h('button', { onclick: (e) => run(async () => {
-      const n = +new FormData(e.target.form).get('n');
-      await reloadCharacter(await api('POST', `/api/characters/${c.id}/hp`, { [k]: n }));
-    }) }, k === 'temp' ? 'Set temp HP' : k[0].toUpperCase() + k.slice(1))));
+      const fd = new FormData(e.target.form);
+      await reloadCharacter(await api('POST', `/api/characters/${c.id}/hp`, { [k]: +fd.get('n'), ...(k === 'damage' && fd.get('critical') && { critical: true }) }));
+    }) }, k === 'temp' ? 'Set temp HP' : k[0].toUpperCase() + k.slice(1))),
+    c.hp.current === 0 && check('Critical hit (two failed death saves)', 'critical'));
+  const ds = c.deathSaves;
+  const dying = c.hp.current === 0 && h('div', { class: 'note', role: 'status' },
+    h('strong', {}, ds.dead ? `${c.name} is dead.` : ds.stable ? `${c.name} is stable at 0 HP.` : `${c.name} is dying.`), ' ',
+    `Successes ${'✓'.repeat(ds.successes)}${'○'.repeat(3 - ds.successes)} · Failures ${'✗'.repeat(ds.failures)}${'○'.repeat(3 - ds.failures)} `,
+    !ds.dead && !ds.stable && h('button', { onclick: () => run(async () => {
+      const r = await api('POST', `/api/characters/${c.id}/death-save`, { visibility: rollOpts().visibility });
+      state.lastRolls = r.rolls; state.lastNote = null; await reloadCharacter(r);
+    }) }, 'Roll death save'));
 
   const progress = adv.mode === 'xp'
     ? [h('p', {}, `XP ${v.xp}${v.nextLevelXp ? ` / ${v.nextLevelXp} for level ${v.level + 1}` : ' (max level)'}`),
@@ -394,8 +405,14 @@ function renderSheet() {
     h('section', {},
       h('h3', {}, `Hit points ${c.hp.current} / ${s.maxHp}${c.hp.temp ? ` (+${c.hp.temp} temp)` : ''}`),
       h('progress', { max: s.maxHp, value: c.hp.current, 'aria-label': 'Hit points' }), hpForm,
-      h('div', { style: 'display:flex;gap:8px' }, ['short', 'long'].map((k) => h('button', { onclick: () => run(async () =>
-        reloadCharacter(await api('POST', `/api/characters/${c.id}/rest`, { kind: k }))) }, `${k[0].toUpperCase() + k.slice(1)} rest`))),
+      dying,
+      h('form', { onsubmit: (e) => e.preventDefault(), style: 'align-items:end' },
+        field(`Hit Point Dice to spend (${v.level - c.hitDiceUsed}/${v.level} ${s.hitDie} left)`, h('select', { name: 'hitDice' },
+          [...Array(v.level - c.hitDiceUsed + 1).keys()].map((n) => h('option', { value: n }, n)))),
+        ['short', 'long'].map((k) => h('button', { onclick: (e) => run(async () => {
+          const r = await api('POST', `/api/characters/${c.id}/rest`, { kind: k, hitDice: k === 'short' ? +new FormData(e.target.form).get('hitDice') : undefined });
+          state.lastRolls = r.rolls; state.lastNote = `${c.name} finished a ${k} rest.`; await reloadCharacter(r);
+        }) }, `${k[0].toUpperCase() + k.slice(1)} rest`))),
       h('p', {}, `AC ${s.armorClass} (${s.armor.label}) · Speed ${s.speed} ft · Proficiency ${signed(s.proficiencyBonus)} · Passive Perception ${s.passivePerception} · Hit die ${s.hitDie} · `,
         roll('initiative', `Initiative ${signed(s.initiative)}`)),
       h('table', { style: 'width:100%;border-collapse:collapse' },
@@ -413,6 +430,7 @@ function renderSheet() {
         h('input', { type: 'checkbox', checked: c.conditions.includes(x) || false, onchange: (e) => run(async () =>
           reloadCharacter(await api('PATCH', `/api/characters/${c.id}`, { conditions: e.target.checked ? [...c.conditions, x] : c.conditions.filter((y) => y !== x) }))) }), x))),
       inventoryEditor(c),
+      journalEditor(c),
       h('h3', {}, 'Story'),
       h('form', { onsubmit: onSubmit(async (f) => reloadCharacter(await api('PATCH', `/api/characters/${c.id}`, { name: f.name, personality: f.personality, backstory: f.backstory }))) },
         field('Name', h('input', { name: 'name', value: c.name })),
@@ -429,6 +447,18 @@ function renderSheet() {
         field('Reason', h('input', { name: 'reason', required: true })), h('button', {}, 'Award')),
       gm && adv.mode === 'milestone' && h('form', { onsubmit: onSubmit(async (f) => { await api('POST', `/api/campaigns/${c.campaignId}/milestone`, { reason: f.reason, characterIds: [c.id] }); await reloadCharacter(); }) },
         field(`Award ${c.name} a level`, h('input', { name: 'reason', required: true, placeholder: 'Personal quest complete' })), h('button', {}, 'Award level')))));
+}
+
+function journalEditor(c) {
+  return [h('h3', {}, 'Journal'),
+    c.journal.length ? h('ul', {}, [...c.journal].reverse().map((e) => h('li', {}, h('span', { class: 'muted' }, `${new Date(e.at).toLocaleString()} · ${e.visibility === 'party' ? 'shared with the party' : 'private'} · `),
+      h('span', { style: 'white-space:pre-wrap' }, e.text), ' ',
+      h('button', { class: 'link', onclick: () => run(async () => reloadCharacter(await api('DELETE', `/api/journal-entries/${e.id}`))) }, 'delete'))))
+      : h('p', { class: 'muted' }, 'No entries yet.'),
+    h('form', { onsubmit: onSubmit(async (f, form) => { const r = await api('POST', `/api/characters/${c.id}/journal`, f); form.reset(); await reloadCharacter(r); }) },
+      h('label', { style: 'width:100%' }, 'New entry', h('textarea', { name: 'text', required: true })),
+      field('Visible to', h('select', { name: 'visibility' }, h('option', { value: 'private' }, 'me and the GM'), h('option', { value: 'party' }, 'the party'))),
+      h('button', {}, 'Add entry'))];
 }
 
 function inventoryEditor(c) {

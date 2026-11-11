@@ -248,6 +248,7 @@ function createApp({ store = memoryStore() } = {}) {
           mode: override ? oneOf(b.advancement, ADVANCEMENT, 'advancement') : world.settings.advancement,
           source: override ? 'campaign' : 'world',
           levelUp: oneOf(b.levelUp ?? 'confirm', ['auto', 'confirm'], 'levelUp'),
+          alignLevels: bool(b.alignLevels ?? false, 'alignLevels'),
         },
       };
       db.campaigns.push(campaign);
@@ -261,12 +262,13 @@ function createApp({ store = memoryStore() } = {}) {
       const cur = campaign.advancement;
       const mode = b.mode === undefined ? cur.mode : oneOf(b.mode, ADVANCEMENT, 'mode');
       const levelUp = b.levelUp === undefined ? cur.levelUp || 'confirm' : oneOf(b.levelUp, ['auto', 'confirm'], 'levelUp');
+      const alignLevels = b.alignLevels === undefined ? !!cur.alignLevels : bool(b.alignLevels, 'alignLevels');
       if (mode !== cur.mode && b.confirm !== true) {
         fail(409, `Switching ${cur.mode} → ${mode} keeps every character's current level and history; ` +
           'future awards use the new mode and no level is added or removed now. Resend with confirm: true.');
       }
-      if (mode === cur.mode && levelUp === (cur.levelUp || 'confirm')) return campaign;
-      campaign.advancement = { mode, levelUp, source: mode === cur.mode ? cur.source : 'campaign' };
+      if (mode === cur.mode && levelUp === (cur.levelUp || 'confirm') && alignLevels === !!cur.alignLevels) return campaign;
+      campaign.advancement = { mode, levelUp, alignLevels, source: mode === cur.mode ? cur.source : 'campaign' };
       record(u.id, 'campaign.advancement.changed', { campaignId: campaign.id, from: cur, to: campaign.advancement });
       return campaign;
     },

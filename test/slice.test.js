@@ -16,11 +16,11 @@ test('vertical slice with server-enforced visibility', async (t) => {
   assert.equal(world.settings.advancement, 'xp');
 
   const campaign = await ok('POST', `/api/worlds/${world.id}/campaigns`, { name: 'Three Weeks' }, gm);
-  assert.deepEqual(campaign.advancement, { mode: 'xp', source: 'world', levelUp: 'confirm' });
+  assert.deepEqual(campaign.advancement, { mode: 'xp', source: 'world', levelUp: 'confirm', alignLevels: false });
   // Switching mode needs explicit confirmation.
   assert.equal((await call('PATCH', `/api/campaigns/${campaign.id}/advancement`, { mode: 'milestone' }, gm)).status, 409);
   const switched = await ok('PATCH', `/api/campaigns/${campaign.id}/advancement`, { mode: 'milestone', confirm: true }, gm);
-  assert.deepEqual(switched.advancement, { mode: 'milestone', source: 'campaign', levelUp: 'confirm' });
+  assert.deepEqual(switched.advancement, { mode: 'milestone', source: 'campaign', levelUp: 'confirm', alignLevels: false });
 
   const town = await ok('POST', `/api/locations/${world.rootLocationId}/children`,
     { name: 'Greyhaven', type: 'town', x: 40, y: 60, visibility: 'public' }, gm);

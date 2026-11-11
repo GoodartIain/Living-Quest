@@ -42,7 +42,7 @@ function upgrade(db) {
   for (const p of db.pages) { p.kind ??= p.locationId ? 'location' : 'lore'; p.visibility ??= 'party'; p.locationId ??= null; }
   for (const i of db.invites) i.acceptedBy ??= null;
   for (const t of db.tokens) t.characterId ??= null;
-  for (const c of db.campaigns) c.advancement.levelUp ??= 'confirm';
+  for (const c of db.campaigns) { c.advancement.levelUp ??= 'confirm'; c.advancement.alignLevels ??= false; }
   for (const c of db.characters) {
     c.weapons ??= []; c.spells ??= []; c.slotsUsed ??= {}; c.armor ??= null; c.shield ??= false; c.masteries ??= []; c.raging ??= false;
     c.deathSaves ??= { successes: 0, failures: 0 }; c.hitDiceUsed ??= 0; c.journal ??= [];

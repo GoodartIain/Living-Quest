@@ -30,7 +30,8 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
 
   function summary(c) {
     return { id: c.id, name: c.name, portraitUrl: c.portraitUrl, species: c.species, className: c.className,
-      level: levelOf(c), conditions: c.conditions, ownerName: find('users', c.ownerId).name, campaignId: c.campaignId };
+      level: levelOf(c), conditions: c.conditions, ownerName: find('users', c.ownerId).name, campaignId: c.campaignId,
+      journal: c.journal.filter((e) => e.visibility === 'party') };
   }
   function sheet(c) {
     const level = levelOf(c);
@@ -66,9 +67,24 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
       category: null, reason, by, auto, at: new Date().toISOString() });
     c.hp.current += maxHpOf(c) - before; // levelling raises current HP by the same amount as the maximum
   }
+  function recover(c) {
+    c.deathSaves = { successes: 0, failures: 0 };
+    c.conditions = c.conditions.filter((x) => x !== 'Unconscious');
+  }
+  // Aligned parties: a new character starts at the party's highest level (and XP), recorded in its ledger.
+  function joinParty(c, camp, by) {
+    const party = db.characters.filter((x) => x.campaignId === camp.id && x.id !== c.id);
+    if (!camp.advancement.alignLevels || !party.length) return;
+    const level = Math.max(...party.map(levelOf));
+    const xp = Math.max(...party.map(xpOf));
+    const at = new Date().toISOString();
+    if (xp) db.advancements.push({ id: id(), worldId: c.worldId, campaignId: camp.id, characterId: c.id, kind: 'xp', amount: xp, category: 'other', reason: 'Joined at the party\'s XP', by, auto: true, at });
+    while (levelOf(c) < level) addLevel(c, by, 'Joined at the party\'s level', true);
+  }
   function targets(camp, ids) {
     const all = db.characters.filter((c) => c.campaignId === camp.id);
     if (ids === undefined) return all; // whole party
+    if (camp.advancement.alignLevels) fail(409, 'this campaign keeps party levels aligned: award the whole party'); 
     if (!Array.isArray(ids) || !ids.length) fail(400, 'characterIds must be a non-empty list, or left out for the whole party');
     return ids.map((cid) => all.find((c) => c.id === cid) || fail(400, 'character is not in this campaign'));
   }
@@ -189,6 +205,7 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
         deathSaves: { successes: 0, failures: 0 }, hitDiceUsed: 0, journal: [] };
       c.hp.current = rules.derive(c, 1).maxHp;
       db.characters.push(c);
+      joinParty(c, camp, u.id);
       record(u.id, 'character.created', { characterId: c.id, campaignId: camp.id, ownerId });
       return sheet(c);
     },
@@ -253,9 +270,22 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
       const before = { ...c.hp };
       if (keys[0] === 'damage') {
         const fromTemp = Math.min(c.hp.temp, n);
-        c.hp = { temp: c.hp.temp - fromTemp, current: Math.max(0, c.hp.current - (n - fromTemp)) };
-      } else if (keys[0] === 'heal') c.hp = { ...c.hp, current: Math.min(max, c.hp.current + n) };
-      else c.hp = { ...c.hp, temp: Math.max(c.hp.temp, n) };
+        const hit = n - fromTemp;
+        const ds = { ...c.deathSaves };
+        if (c.hp.current === 0 && hit > 0) { // damage while at 0 HP is a failed death save (two on a critical hit)
+          if (hit >= max) ds.dead = true;
+          ds.failures = Math.min(3, ds.failures + (b.critical === true ? 2 : 1));
+          if (ds.failures >= 3) ds.dead = true;
+          ds.stable = false;
+        } else if (hit - c.hp.current >= max) ds.dead = true; // massive damage: the rest equals or exceeds max HP
+        c.hp = { temp: c.hp.temp - fromTemp, current: Math.max(0, c.hp.current - hit) };
+        c.deathSaves = ds;
+        if (c.hp.current === 0 && !c.conditions.includes('Unconscious')) c.conditions = [...c.conditions, 'Unconscious'];
+      } else if (keys[0] === 'heal') {
+        if (c.deathSaves.dead) fail(409, `${c.name} is dead; healing needs magic that raises the dead`);
+        if (c.hp.current === 0 && n > 0) recover(c);
+        c.hp = { ...c.hp, current: Math.min(max, c.hp.current + n) };
+      } else c.hp = { ...c.hp, temp: Math.max(c.hp.temp, n) };
       record(u.id, 'character.hp', { characterId: c.id, [keys[0]]: n, before, after: c.hp });
       sync(c);
       return sheet(c);
@@ -382,11 +412,91 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
       const c = find('characters', p.id);
       owner(u, c);
       const kind = oneOf(b.kind, ['short', 'long'], 'kind');
-      if (kind === 'long') { c.hp = { current: maxHpOf(c), temp: 0 }; c.slotsUsed = {}; }
-      else { const { pact, ...rest } = c.slotsUsed; c.slotsUsed = rest; }
-      record(u.id, `character.rest.${kind}`, { characterId: c.id });
+      if (c.deathSaves.dead) fail(409, `${c.name} is dead`);
+      const rolls = [];
+      if (kind === 'long') { // 2024: all HP, all spent Hit Point Dice, all slots
+        if (c.hp.current === 0) recover(c);
+        c.hp = { current: maxHpOf(c), temp: 0 }; c.slotsUsed = {}; c.hitDiceUsed = 0;
+      } else {
+        const spend = num(b.hitDice ?? 0, 'hitDice', 0, levelOf(c) - c.hitDiceUsed, true);
+        if (spend && c.hp.current === 0) fail(409, 'a creature at 0 HP cannot spend Hit Point Dice');
+        if (spend) {
+          const s = rules.derive(c, levelOf(c));
+          const con = s.modifiers.con;
+          const r = makeRoll(u, c.worldId, { formula: `${spend}${s.hitDie}${con ? `${con > 0 ? '+' : '-'}${Math.abs(con * spend)}` : ''}`, label: `${c.name}: short rest, ${spend} Hit Point ${spend === 1 ? 'Die' : 'Dice'}`, characterId: c.id });
+          rolls.push(r);
+          c.hp = { ...c.hp, current: Math.min(maxHpOf(c), c.hp.current + Math.max(0, r.total)) };
+          c.hitDiceUsed += spend;
+        }
+        const { pact, ...rest } = c.slotsUsed; c.slotsUsed = rest;
+      }
+      record(u.id, `character.rest.${kind}`, { characterId: c.id, hitDice: b.hitDice || 0 });
       sync(c);
+      return { ...sheet(c), rolls };
+    },
+
+    // A d20 at 0 HP: 10+ succeeds, 1 counts twice, 20 brings the character back with 1 HP. Three of either ends it.
+    'POST /api/characters/:id/death-save': (u, b, p) => {
+      const c = find('characters', p.id);
+      owner(u, c);
+      if (c.hp.current > 0) fail(409, `${c.name} is not dying`);
+      const ds = c.deathSaves;
+      if (ds.dead || ds.stable) fail(409, `${c.name} is ${ds.dead ? 'dead' : 'stable'}`);
+      const r = makeRoll(u, c.worldId, { formula: '1d20', label: `${c.name}: death saving throw`, characterId: c.id,
+        visibility: oneOf(b.visibility ?? 'public', ['public', 'private'], 'visibility'), sceneId: b.sceneId });
+      const roll = r.parts[0].sum;
+      let next = { ...ds };
+      if (roll === 20) { recover(c); c.hp = { ...c.hp, current: 1 }; next = c.deathSaves; }
+      else if (roll === 1) next.failures = Math.min(3, ds.failures + 2);
+      else if (roll >= 10) next.successes = ds.successes + 1;
+      else next.failures = ds.failures + 1;
+      if (next.successes >= 3) next = { successes: 3, failures: next.failures, stable: true };
+      if (next.failures >= 3) next.dead = true;
+      c.deathSaves = next;
+      record(u.id, 'character.death-save', { characterId: c.id, roll, after: next });
+      sync(c);
+      return { ...sheet(c), rolls: [r] };
+    },
+
+    'POST /api/characters/:id/journal': (u, b, p) => {
+      const c = find('characters', p.id);
+      owner(u, c);
+      if (c.journal.length >= 500) fail(409, 'journal is full (500 entries)');
+      c.journal = [...c.journal, { id: id(), at: new Date().toISOString(), by: u.name, text: str(b.text, 'text', 10000),
+        visibility: oneOf(b.visibility ?? 'private', ['private', 'party'], 'visibility') }];
+      record(u.id, 'character.journal', { characterId: c.id });
       return sheet(c);
+    },
+    'DELETE /api/journal-entries/:id': (u, _b, p) => {
+      const c = db.characters.find((x) => x.journal.some((e) => e.id === p.id)) || fail(404, 'journal entry not found');
+      owner(u, c);
+      c.journal = c.journal.filter((e) => e.id !== p.id);
+      record(u.id, 'character.journal.deleted', { characterId: c.id, entryId: p.id });
+      return sheet(c);
+    },
+
+    // Rolls initiative for a combatant and re-sorts the order, keeping whoever's turn it is.
+    'POST /api/scenes/:id/encounter/initiative': (u, b, p) => {
+      const scene = find('scenes', p.id);
+      const role = need(u, scene.worldId, 'player');
+      if (!canSeeScene(u, scene)) fail(404, 'scene not found');
+      const enc = scene.encounter || fail(409, 'no encounter running');
+      const token = find('tokens', b.tokenId);
+      if (token.sceneId !== scene.id) fail(400, 'token is not in this scene');
+      if (role !== 'gm' && !token.controlledBy.includes(u.id)) fail(403, 'roll initiative for your own tokens');
+      const entry = enc.combatants.find((x) => x.tokenId === token.id) || fail(409, 'that token is not in the encounter');
+      const ch = token.characterId && db.characters.find((x) => x.id === token.characterId);
+      const mode = oneOf(b.mode ?? 'normal', ['normal', 'advantage', 'disadvantage'], 'mode');
+      const bonus = ch ? rules.derive(ch, levelOf(ch)).initiative : role === 'gm' ? num(b.bonus ?? 0, 'bonus', -10, 20, true) : 0;
+      const r = makeRoll(u, scene.worldId, { formula: `1d20${bonus < 0 ? '-' : '+'}${Math.abs(bonus)}`, mode, label: `${ch ? ch.name : token.name}: Initiative`,
+        visibility: token.visibility === 'gm' ? 'gm' : 'public', sceneId: scene.id, characterId: ch ? ch.id : null });
+      const current = enc.combatants[enc.turn];
+      entry.initiative = r.total;
+      enc.combatants.sort((a, c2) => c2.initiative - a.initiative);
+      enc.turn = Math.max(0, enc.combatants.indexOf(current));
+      record(u.id, 'encounter.initiative', { sceneId: scene.id, tokenId: token.id, initiative: r.total });
+      publishScene(scene.id);
+      return r;
     },
 
     'GET /api/worlds/:id/rolls': (u, _b, p) => {

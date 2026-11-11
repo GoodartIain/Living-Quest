@@ -442,6 +442,7 @@ function drawEncounter() {
     : [h('p', {}, `Round ${encounter.round}`),
       h('ol', {}, encounter.combatants.map((c) => h('li', { class: c.tokenId === encounter.turnTokenId ? 'turn' : '', 'aria-current': c.tokenId === encounter.turnTokenId ? 'true' : null },
         `${name(c.tokenId)} — ${c.initiative} `,
+        (gm || (tokens.find((t) => t.id === c.tokenId) || {}).mine) && [h('button', { class: 'link', onclick: () => run(() => api('POST', `/api/scenes/${scene.id}/encounter/initiative`, { tokenId: c.tokenId })) }, 'roll'), ' '],
         gm && [h('button', { class: 'link', onclick: () => { const n = prompt(`Initiative for ${name(c.tokenId)}`, c.initiative); if (n !== null) put(encounter.combatants.map((x) => x === c ? { ...x, initiative: Number(n) } : x)); } }, 'set'), ' ',
           h('button', { class: 'link', onclick: () => encounter.combatants.length > 1 ? put(encounter.combatants.filter((x) => x !== c)) : run(() => api('DELETE', `/api/scenes/${scene.id}/encounter`)) }, 'remove')]))),
       gm && h('div', { style: 'display:flex;gap:8px' },
