@@ -209,6 +209,11 @@ module.exports = function tabletop({ db, find, fail, need, viewer, record, id, S
     req.on('close', () => { clearInterval(beat); subscribers.delete(sub); });
   }
 
+  routes['GET /api/worlds/:id/scenes'] = (u, _b, p) => {
+    need(u, p.id, 'spectator');
+    return db.scenes.filter((s) => s.worldId === p.id && canSee(u, s))
+      .map((s) => ({ id: s.id, name: s.name, visibility: s.visibility, locationId: s.locationId, location: find('locations', s.locationId).name }));
+  };
   const scenesAt = (role, locId) => db.scenes.filter((s) => s.locationId === locId && SEES[role].includes(s.visibility))
     .map((s) => ({ id: s.id, name: s.name, visibility: s.visibility }));
 

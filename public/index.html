@@ -68,6 +68,7 @@
 <script src="markdown.js"></script>
 <script src="sheet.js"></script>
 <script src="chat.js"></script>
+<script src="director.js"></script>
 <script src="vendor/livekit-client.umd.js"></script>
 <script src="voice.js"></script>
 <script>
@@ -142,7 +143,7 @@ async function render() {
 async function openWorld(id) {
   state.world = await api('GET', `/api/worlds/${id}`);
   state.pages = await api('GET', `/api/worlds/${id}/pages`);
-  state.results = null; state.wizard = null; state.character = null;
+  state.results = null; state.wizard = null; state.character = null; state.director = null;
   await Promise.all([loadCharacters(), loadRules()]);
   startChat(state.world.campaigns[0] && state.world.campaigns[0].id);
   await go(state.world.rootLocationId);
@@ -169,8 +170,11 @@ async function refresh() {
 function renderWorld() {
   const w = state.world, v = state.loc, gm = w.role === 'gm';
   if (state.scene) return renderScene();
+  if (state.director) return renderDirector();
   if (state.wizard) return renderWizard();
   if (state.character) return renderSheet();
+  const banner = liveBanner();
+  if (banner) $app.append(banner);
   $app.append(h('section', {},
     h('div', { class: 'crumbs' }, h('button', { class: 'link', onclick: () => { state.world = null; render(); } }, 'All worlds'), '›', h('strong', {}, w.name), h('span', {}, `(${w.role})`)),
     h('p', { class: 'muted' }, `Ruleset ${w.settings.ruleset} · default advancement ${w.settings.advancement} · NPC autonomy ${w.settings.npcAutonomy}`),
@@ -230,6 +234,7 @@ function campaignsPanel(w) {
         catch (e) { if (e.status !== 409 || !confirm(e.message)) throw e; await api('PATCH', `/api/campaigns/${c.id}/advancement`, { mode, confirm: true }); }
         await openWorld(w.id);
       }) }, 'switch mode'), ' · ',
+      h('button', { class: 'link', onclick: () => openDirector(c.id) }, 'director'), ' · ',
       h('button', { class: 'link', onclick: () => run(async () => { const r = await api('POST', `/api/campaigns/${c.id}/invites`, { role: 'player' }); prompt('Player invite code (single use):', r.code); }) }, 'invite player'), ' · ',
       h('button', { class: 'link', onclick: () => run(async () => { const r = await api('POST', `/api/campaigns/${c.id}/invites`, { role: 'spectator' }); prompt('Spectator invite code (single use):', r.code); }) }, 'invite spectator')))),
     h('form', { onsubmit: onSubmit(async (f) => { await api('POST', `/api/worlds/${w.id}/campaigns`, f.advancement ? f : { name: f.name }); await openWorld(w.id); }) },

@@ -100,5 +100,7 @@ module.exports = function chat({ db, find, fail, need, record, id, check, charac
     req.on('close', () => { clearInterval(beat); subscribers.delete(sub); });
   }
 
-  return { routes, stream, subscribers };
+  // Campaign-wide notices on the chat stream (e.g. the GM's live scene), shaped per recipient.
+  const broadcast = (campaignId, event, dataFor) => { for (const s of subscribers) if (s.campaignId === campaignId) write(s.res, event, dataFor(s.user)); };
+  return { routes, stream, subscribers, broadcast };
 };

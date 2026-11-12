@@ -193,7 +193,9 @@ function createApp({ store = memoryStore(), env = process.env } = {}) {
       return {
         ...world,
         role,
-        campaigns: db.campaigns.filter((c) => c.worldId === p.id && (role === 'gm' || mine.has(c.id))),
+        // Players never receive the GM's notes, beats or mute list; the live scene only if they can see it.
+        campaigns: db.campaigns.filter((c) => c.worldId === p.id && (role === 'gm' || mine.has(c.id))).map((c) => (role === 'gm' ? c
+          : { id: c.id, worldId: c.worldId, name: c.name, advancement: c.advancement, liveSceneId: liveFor(u, c) })),
         members: role === 'gm' ? db.memberships.filter((m) => m.worldId === p.id)
           .map((m) => ({ userId: m.userId, name: find('users', m.userId).name, role: m.role, campaignId: m.campaignId })) : undefined,
       };
@@ -253,6 +255,7 @@ function createApp({ store = memoryStore(), env = process.env } = {}) {
           alignLevels: bool(b.alignLevels ?? false, 'alignLevels'),
         },
         voice: { spectators: 'none', muted: [] },
+        director: { liveSceneId: null, notes: '', beats: [] },
       };
       db.campaigns.push(campaign);
       record(u.id, 'campaign.created', { campaignId: campaign.id, advancement: campaign.advancement });
@@ -356,6 +359,32 @@ function createApp({ store = memoryStore(), env = process.env } = {}) {
   const table2d = tabletop({ db, find, fail, need, viewer, record, id, SEES, VISIBILITY, check, hooks });
   const chars = characters({ db, find, fail, need, record, id, check, publishScene: table2d.publish, canSeeScene: table2d.canSee });
   Object.assign(hooks, { tokenInfo: chars.tokenInfo, sceneRolls: chars.sceneRolls });
+  const liveFor = (u, c) => {
+    const s = c.director && c.director.liveSceneId && db.scenes.find((x) => x.id === c.director.liveSceneId);
+    return s && table2d.canSee(u, s) ? s.id : null;
+  };
+  // GM Director Mode: the live scene everyone is pointed to, private notes and story beats.
+  routes['PATCH /api/campaigns/:id/director'] = (u, b, p) => {
+    const c = find('campaigns', p.id);
+    need(u, c.worldId, 'gm');
+    const d = { ...c.director };
+    if (b.liveSceneId !== undefined) {
+      if (b.liveSceneId !== null && find('scenes', b.liveSceneId).worldId !== c.worldId) fail(400, 'scene belongs to another world');
+      d.liveSceneId = b.liveSceneId;
+    }
+    if (b.notes !== undefined) {
+      if (typeof b.notes !== 'string' || b.notes.length > 20000) fail(400, 'notes must be text up to 20000 chars');
+      d.notes = b.notes;
+    }
+    if (b.beats !== undefined) {
+      if (!Array.isArray(b.beats) || b.beats.length > 100) fail(400, 'beats must be a list of up to 100');
+      d.beats = b.beats.map((x) => ({ id: typeof x.id === 'string' && x.id.length <= 40 ? x.id : id(), text: str(x.text, 'beat', 200), done: x.done === true }));
+    }
+    c.director = d;
+    record(u.id, 'director.updated', { campaignId: c.id, fields: Object.keys(b) });
+    if (b.liveSceneId !== undefined) talk.broadcast(c.id, 'live', (viewer) => ({ campaignId: c.id, sceneId: liveFor(viewer, c) }));
+    return c;
+  };
   const talk = chat({ db, find, fail, need, record, id, check,
     characterOwner: (u, c) => c.ownerId === u.id || find('worlds', c.worldId).ownerId === u.id });
   const calls = voice({ db, find, fail, need, record, check, env });

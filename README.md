@@ -1,6 +1,6 @@
 # Living Quest
 
-Browser tabletop / worldbuilding platform. This repository holds Milestones 1–4 and most of 5: worlds, campaigns, advancement settings, invites, nested maps, a linked wiki (NPCs, factions, lore) with relationships, backlinks, search, history and per-campaign discovery, a live 2D tabletop (tokens, fog of war, measuring, encounters), characters (guided creation, sheets, server-side dice, XP or milestone levelling linked to tokens), campaign chat with whispers, and voice/video calls through a self-hosted LiveKit server, all with server-enforced visibility.
+Browser tabletop / worldbuilding platform. This repository holds Milestones 1–5: worlds, campaigns, advancement settings, invites, nested maps, a linked wiki (NPCs, factions, lore) with relationships, backlinks, search, history and per-campaign discovery, a live 2D tabletop (tokens, fog of war, measuring, encounters), characters (guided creation, sheets, server-side dice, XP or milestone levelling linked to tokens), campaign chat with whispers, and voice/video calls through a self-hosted LiveKit server, all with server-enforced visibility.
 
 ```sh
 docker compose up                      # app + PostgreSQL 16, http://localhost:3000

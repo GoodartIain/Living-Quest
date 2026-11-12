@@ -289,7 +289,8 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
       const role = need(u, camp.worldId, 'spectator');
       if (role !== 'gm' && !db.memberships.some((m) => m.userId === u.id && m.campaignId === camp.id)) fail(404, 'campaign not found');
       return db.characters.filter((c) => c.campaignId === camp.id)
-        .map((c) => ({ ...summary(c), mine: c.ownerId === u.id, pendingLevels: role === 'gm' && camp.advancement.mode === 'xp' ? pendingOf(c) : undefined }));
+        .map((c) => ({ ...summary(c), mine: c.ownerId === u.id, pendingLevels: role === 'gm' && camp.advancement.mode === 'xp' ? pendingOf(c) : undefined,
+          ...(role === 'gm' && { hp: c.hp, maxHp: maxHpOf(c), armorClass: rules.derive(c, levelOf(c)).armorClass, pendingChoices: rules.pendingChoices(c, levelOf(c)).length, deathSaves: c.deathSaves }) }));
     },
 
     'GET /api/characters/:id': (u, _b, p) => view(u, find('characters', p.id)),
