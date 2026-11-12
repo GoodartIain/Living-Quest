@@ -32,6 +32,7 @@ function renderDirector() {
       h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:8px' },
         h('button', { onclick: () => { chat.open = true; drawChat(true); } }, 'Open chat'),
         h('button', { onclick: () => { voice.open = true; drawVoice(); } }, 'Open voice & video'))),
+    h('section', { id: 'dir-stream' }),
     h('div', { class: 'row' },
       h('section', { id: 'dir-scene' }, h('p', { class: 'muted' }, 'Loading…')),
       h('section', { id: 'dir-party' }, h('p', { class: 'muted' }, 'Loading…'))),
@@ -54,6 +55,7 @@ function renderDirector() {
           h('label', { style: 'width:100%' }, 'Notes', h('textarea', { name: 'body', rows: 2 })),
           h('button', {}, 'Create'), h('span', { id: 'dir-created' })))));
   drawLive();
+  run(() => drawStream());
   clearInterval(directorTimer);
   // shortcut: polls every 5 s while open; switch to the scene/campaign streams if GMs need instant updates
   directorTimer = setInterval(() => { if (state.director && !document.hidden) drawLive(); }, 5000);
@@ -94,6 +96,34 @@ async function drawLive() {
           h('button', { class: 'link', onclick: () => run(async () => { await api('POST', `/api/characters/${ch.id}/level-up`); await drawLive(); }) }, 'approve'), ' '],
         ch.pendingChoices > 0 && `${ch.pendingChoices} level-up choice(s) for the player to make`))))
       : h('p', { class: 'muted' }, 'No characters in this campaign yet.')));
+}
+
+// Livestream (Milestone 7): the broadcast link for OBS, what is on air, and an immediate stop.
+async function drawStream(link) {
+  const c = campaignOf();
+  const box = document.getElementById('dir-stream');
+  if (!c || !box) return;
+  const [b, scenes] = await Promise.all([api('GET', `/api/campaigns/${c.id}/broadcast`), api('GET', `/api/worlds/${state.world.id}/scenes`)]);
+  const patch = (body) => run(async () => { const r = await api('PATCH', `/api/campaigns/${c.id}/broadcast`, body); await drawStream(r.key && `${location.origin}/broadcast.html#key=${r.key}`); });
+  const onAir = scenes.find((x) => x.id === b.sceneId);
+  box.replaceChildren(h('div', {}, h('h3', {}, `Livestream · ${b.enabled ? 'ON AIR' : 'off'}`),
+    h('p', { class: 'muted' }, 'The stream shows exactly what a spectator may see of the on-air scene: public tokens, revealed areas, public rolls. Never notes, whispers or hidden tokens.'),
+    link && h('div', { class: 'note' }, h('p', {}, h('strong', {}, 'Broadcast link for OBS (shown once; keep it private): ')),
+      h('input', { value: link, readonly: true, style: 'width:100%', 'aria-label': 'Broadcast link', onfocus: (e) => e.target.select() }),
+      h('p', { class: 'muted' }, 'Add it as a Browser Source (1920×1080). Append &view=3d for the 3D tactical camera.')),
+    h('form', { onsubmit: onSubmit((f) => patch({ enabled: !!f.enabled, sceneId: f.sceneId || null, title: f.title, showInitiative: !!f.showInitiative, showRolls: !!f.showRolls })) },
+      h('label', { class: 'inline' }, h('input', { type: 'checkbox', name: 'enabled', checked: b.enabled || false }), 'On air'),
+      field('On-air scene', h('select', { name: 'sceneId' }, h('option', { value: '' }, '— none —'),
+        scenes.map((x) => h('option', { value: x.id, selected: x.id === b.sceneId || false }, `${x.name} (${x.visibility}${x.visibility === 'public' ? '' : ': not shown on stream'})`)))),
+      field('Title', h('input', { name: 'title', value: b.title, maxlength: 120 })),
+      h('label', { class: 'inline' }, h('input', { type: 'checkbox', name: 'showInitiative', checked: b.showInitiative || false }), 'Initiative'),
+      h('label', { class: 'inline' }, h('input', { type: 'checkbox', name: 'showRolls', checked: b.showRolls || false }), 'Public rolls'),
+      h('button', {}, 'Save')),
+    onAir && onAir.visibility !== 'public' && h('p', { class: 'note' }, `"${onAir.name}" is not public, so the stream shows "not shown on stream" until you share it publicly.`),
+    h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap' },
+      b.enabled && h('button', { onclick: () => patch({ enabled: false }) }, 'Stop streaming now'),
+      b.hasKey && h('button', { onclick: () => confirm('Make a new link? The current link stops working at once.') && patch({ rotateKey: true, enabled: true }) }, 'Make a new link'),
+      !b.hasKey && h('p', { class: 'muted' }, 'Tick "On air" and save to get the link.'))));
 }
 
 // Players: a banner pointing to the GM's live scene, kept current by the campaign stream.

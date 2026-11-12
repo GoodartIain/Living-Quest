@@ -55,9 +55,14 @@ test('LiveKit tokens follow campaign roles; GM controls spectators and mutes', a
   const patId = verify(patT.token, 'secret').sub;
   const mute = (muted, tok = c.gm) => c.call('POST', `/api/campaigns/${c.camp.id}/voice/mute`, { userId: patId, muted }, tok);
   assert.equal((await mute(true, c.pat)).status, 403);
+  if (!LK) { // LiveKit is configured but unreachable: the mute fails and nothing is stored
+    assert.ok((await mute(true)).status >= 500);
+    assert.deepEqual((await c.ok('GET', `/api/campaigns/${c.camp.id}/voice`, null, c.gm)).muted, []);
+    return;
+  }
   const m = await mute(true);
   assert.deepEqual(m.body.muted, [patId]);
-  if (LK) assert.equal(m.body.appliedLive, false, 'Pat is not in the call, so the stored mute waits for the next join');
+  assert.equal(m.body.appliedLive, false, 'Pat is not in the call, so the stored mute waits for the next join');
   assert.equal(verify((await tokenFor(c.pat)).body.token, 'secret').video.canPublish, false, 'a muted player rejoins muted');
   await mute(false);
   assert.equal(verify((await tokenFor(c.pat)).body.token, 'secret').video.canPublish, true);

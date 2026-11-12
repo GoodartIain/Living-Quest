@@ -10,7 +10,7 @@ const path = require('node:path');
 const SPEC = {
   users: ['id', 'name', 'tokenHash'],
   worlds: ['id', 'ownerId', 'name', 'settings', 'rootLocationId'],
-  campaigns: ['id', 'worldId', 'name', 'advancement', 'voice', 'director'],
+  campaigns: ['id', 'worldId', 'name', 'advancement', 'voice', 'director', 'broadcast'],
   memberships: ['id', 'userId', 'worldId', 'campaignId', 'role'],
   invites: ['id', 'campaignId', 'worldId', 'role', 'createdBy', 'acceptedBy'],
   maps: ['id', 'worldId', 'locationId', 'name', 'imageUrl'],
@@ -32,7 +32,7 @@ const SPEC = {
   events: ['seq', 'at', 'actor', 'type', 'data'],
 };
 const COLLECTIONS = Object.keys(SPEC);
-const JSON_FIELDS = new Set(['settings', 'advancement', 'voice', 'director', 'walls', 'fog', 'encounter', 'controlledBy', 'data', 'baseScores', 'backgroundBonus',
+const JSON_FIELDS = new Set(['settings', 'advancement', 'voice', 'director', 'walls', 'broadcast', 'fog', 'encounter', 'controlledBy', 'data', 'baseScores', 'backgroundBonus',
   'abilities', 'skills', 'feats', 'tools', 'hp', 'conditions', 'inventory', 'currency', 'parts', 'weapons', 'spells', 'slotsUsed', 'masteries', 'deathSaves', 'journal', 'choices', 'multiclass', 'toUserIds', 'toNames']);
 const APPEND_ONLY = new Set(['events', 'revisions', 'advancements', 'rolls', 'messages', 'chatDeletions']);
 const keyOf = (c) => (c === 'events' ? 'seq' : 'id');
@@ -46,7 +46,8 @@ function upgrade(db) {
   for (const i of db.invites) i.acceptedBy ??= null;
   for (const t of db.tokens) t.characterId ??= null;
   for (const s of db.scenes) s.walls ??= [];
-  for (const c of db.campaigns) { c.advancement.levelUp ??= 'confirm'; c.advancement.alignLevels ??= false; c.voice ??= { spectators: 'none', muted: [] }; c.director ??= { liveSceneId: null, notes: '', beats: [] }; }
+  for (const c of db.campaigns) { c.advancement.levelUp ??= 'confirm'; c.advancement.alignLevels ??= false; c.voice ??= { spectators: 'none', muted: [] }; c.director ??= { liveSceneId: null, notes: '', beats: [] };
+    c.broadcast ??= { enabled: false, keyHash: null, sceneId: null, title: '', showInitiative: true, showRolls: true }; }
   for (const c of db.characters) {
     c.weapons ??= []; c.spells ??= []; c.slotsUsed ??= {}; c.armor ??= null; c.shield ??= false; c.masteries ??= []; c.raging ??= false;
     c.deathSaves ??= { successes: 0, failures: 0 }; c.hitDiceUsed ??= 0; c.journal ??= []; c.choices ??= []; c.subclass ??= null; c.multiclass ??= {};

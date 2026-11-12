@@ -9,6 +9,7 @@ const { memoryStore, postgresStore } = require('./store.js');
 const characters = require('./characters.js');
 const chat = require('./chat.js');
 const voice = require('./voice.js');
+const broadcast = require('./broadcast.js');
 
 const ADVANCEMENT = ['milestone', 'xp'];
 const AUTONOMY = ['static', 'scheduled', 'reactive', 'simulated', 'ai-assisted'];
@@ -74,9 +75,12 @@ function createApp({ store = memoryStore(), env = process.env } = {}) {
   }
 
   // A viewer bound to one world: every visibility decision goes through here.
+  // `user.broadcast` is the livestream viewer: a spectator of exactly that campaign (see broadcast.js).
   function viewer(user, worldId) {
-    const role = need(user, worldId, 'spectator');
-    const campaigns = new Set(db.memberships.filter((m) => m.userId === user.id && m.worldId === worldId).map((m) => m.campaignId));
+    if (user.broadcast && find('campaigns', user.broadcast).worldId !== worldId) fail(404, 'scene not found');
+    const role = user.broadcast ? 'spectator' : need(user, worldId, 'spectator');
+    const campaigns = user.broadcast ? new Set([user.broadcast])
+      : new Set(db.memberships.filter((m) => m.userId === user.id && m.worldId === worldId).map((m) => m.campaignId));
     const seesLoc = (loc) => {
       if (!SEES[role].includes(loc.visibility)) return false;
       if (loc.requiresDiscovery && role !== 'gm' &&
@@ -256,6 +260,7 @@ function createApp({ store = memoryStore(), env = process.env } = {}) {
         },
         voice: { spectators: 'none', muted: [] },
         director: { liveSceneId: null, notes: '', beats: [] },
+        broadcast: { enabled: false, keyHash: null, sceneId: null, title: '', showInitiative: true, showRolls: true },
       };
       db.campaigns.push(campaign);
       record(u.id, 'campaign.created', { campaignId: campaign.id, advancement: campaign.advancement });
@@ -387,6 +392,9 @@ function createApp({ store = memoryStore(), env = process.env } = {}) {
   };
   const talk = chat({ db, find, fail, need, record, id, check,
     characterOwner: (u, c) => c.ownerId === u.id || find('worlds', c.worldId).ownerId === u.id });
+  const cast = broadcast({ db, find, fail, need, record, check, hash, sceneView: table2d.sceneView });
+  hooks.onScene = cast.onScene;
+  Object.assign(routes, cast.routes);
   const calls = voice({ db, find, fail, need, record, check, env });
   Object.assign(routes, table2d.routes, chars.routes, talk.routes, calls.routes);
 
@@ -443,6 +451,7 @@ function createApp({ store = memoryStore(), env = process.env } = {}) {
       const live = req.method === 'GET' && url.pathname.match(/^\/api\/scenes\/([\w-]+)\/stream$/);
       // EventSource cannot send headers, so the stream alone accepts the token as a query parameter.
       if (live) return table2d.stream(req, res, authenticate(req, url.searchParams.get('token')), live[1]);
+      if (req.method === 'GET' && url.pathname === '/api/broadcast/stream') return cast.stream(req, res, url.searchParams.get('key'));
       const chatLive = req.method === 'GET' && url.pathname.match(/^\/api\/campaigns\/([\w-]+)\/chat\/stream$/);
       if (chatLive) return talk.stream(req, res, authenticate(req, url.searchParams.get('token')), chatLive[1]);
       const route = table.find((r) => r.method === req.method && r.re.test(url.pathname)) || fail(404, 'no such route');
@@ -472,7 +481,7 @@ function createApp({ store = memoryStore(), env = process.env } = {}) {
   }
 
   // After a failed write memory is reloaded; drop live streams so browsers reconnect to the stored state.
-  store.onReload(() => { for (const s of [...table2d.subscribers, ...talk.subscribers]) s.res.end(); });
+  store.onReload(() => { for (const s of [...table2d.subscribers, ...talk.subscribers, ...cast.subscribers]) s.res.end(); });
 
   return { handle, db, store };
 }
@@ -492,7 +501,7 @@ function readJson(req) {
 }
 function send(res, status, body) {
   res.writeHead(status, { 'content-type': 'application/json' });
-  res.end(JSON.stringify(body, (k, v) => (k === 'tokenHash' ? undefined : v)));
+  res.end(JSON.stringify(body, (k, v) => (k === 'tokenHash' || k === 'keyHash' ? undefined : v)));
 }
 
 if (require.main === module) {

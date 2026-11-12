@@ -178,6 +178,7 @@ interface Zone { id; polygon: Vec3[]; trigger: Interaction[] }
 ## 9. Spectator security
 
 - Spectator is a server role (implemented: sees only `public` locations, no gm notes, no write routes).
+- Implemented (`broadcast.js`, `public/broadcast.html`): `campaigns.broadcast` = { enabled, keyHash, sceneId, title, showInitiative, showRolls }. `GET /api/broadcast/stream?key=` needs no sign-in (OBS cannot sign in); the key is shown once and only its hash is stored. The stream is built by the same `sceneView` the app uses, with a synthetic viewer that is a spectator of exactly that campaign (so per-campaign discovery and fog apply), then trimmed by the GM's show options. Every scene change publishes to the stream; turning broadcasting off or rotating the key ends open streams immediately.
 - Broadcast output is a **separate projection**: `project(state, spectatorPolicy)` builds a new object from an allowlist (scene id, public placements, public rolls, permitted HP bars, turn order). Nothing is filtered by CSS.
 - Camera: spectators get named camera presets the GM enabled; no free camera, since free camera over unprojected data is the classic leak.
 - Leak tests: for each fixture, assert the broadcast and spectator payloads contain none of the GM-only strings (pattern already used in `test/slice.test.js`).

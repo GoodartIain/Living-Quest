@@ -66,6 +66,7 @@ module.exports = function tabletop({ db, find, fail, need, viewer, record, id, S
   }
 
   function publish(sceneId) {
+    if (hooks.onScene) hooks.onScene(sceneId); // the livestream follows the same changes
     for (const s of subscribers) {
       if (s.sceneId !== sceneId) continue;
       try { s.res.write(`data: ${JSON.stringify(sceneView(s.user, find('scenes', sceneId)))}\n\n`); }
@@ -244,5 +245,5 @@ module.exports = function tabletop({ db, find, fail, need, viewer, record, id, S
     .map((s) => ({ id: s.id, name: s.name, visibility: s.visibility }));
 
   const canSee = (user, scene) => { try { sceneView(user, scene); return true; } catch { return false; } };
-  return { routes, stream, scenesAt, subscribers, publish, canSee };
+  return { routes, stream, scenesAt, subscribers, publish, canSee, sceneView };
 };
