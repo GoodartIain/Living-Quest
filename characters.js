@@ -132,6 +132,13 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
       category: null, reason, by, auto, at: new Date().toISOString() });
     c.hp.current += maxHpOf(c) - before; // levelling raises current HP by the same amount as the maximum
   }
+  // XP into the ledger, then automatic level-ups if the campaign uses them (shared by awards and downtime).
+  function giveXp(c, amount, category, reason, by, at = new Date().toISOString()) {
+    const camp = campaignOf(c);
+    db.advancements.push({ id: id(), worldId: c.worldId, campaignId: camp.id, characterId: c.id, kind: 'xp', amount, category, reason, by, auto: false, at });
+    if (levelUpRule(camp) === 'auto') while (pendingOf(c) > 0) addLevel(c, by, `Reached ${xpOf(c)} XP`, true);
+    sync(c);
+  }
   function recover(c) {
     c.deathSaves = { successes: 0, failures: 0 };
     c.conditions = c.conditions.filter((x) => x !== 'Unconscious');
@@ -374,11 +381,7 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
       const reason = str(b.reason, 'reason', 200);
       const list = targets(camp, b.characterIds);
       const at = new Date().toISOString();
-      for (const c of list) {
-        db.advancements.push({ id: id(), worldId: c.worldId, campaignId: camp.id, characterId: c.id, kind: 'xp', amount, category, reason, by: u.id, auto: false, at });
-        if (levelUpRule(camp) === 'auto') while (pendingOf(c) > 0) addLevel(c, u.id, `Reached ${xpOf(c)} XP`, true);
-        sync(c);
-      }
+      for (const c of list) giveXp(c, amount, category, reason, u.id, at);
       record(u.id, 'advancement.xp', { campaignId: camp.id, amount, category, reason, characterIds: list.map((c) => c.id) });
       return list.map((c) => ({ id: c.id, name: c.name, xp: xpOf(c), level: levelOf(c), pendingLevels: pendingOf(c) }));
     },
@@ -638,5 +641,6 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
     },
   };
 
-  return { routes, tokenInfo, sceneRolls: (u, role, sceneId) => rollsFor(u, role, (r) => r.sceneId === sceneId), XP_CATEGORIES };
+  return { routes, tokenInfo, sceneRolls: (u, role, sceneId) => rollsFor(u, role, (r) => r.sceneId === sceneId), XP_CATEGORIES, giveXp, sync,
+    rollCheck: (u, c, chk, visibility = 'private') => makeRoll(u, c.worldId, { ...checkFormula(c, chk), visibility, characterId: c.id }) };
 };

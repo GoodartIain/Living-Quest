@@ -165,6 +165,7 @@ interface Zone { id; polygon: Vec3[]; trigger: Interaction[] }
 - Activity request: `{ character, template, start, duration, location, costs }`. Scheduler rejects overlapping intervals for the same character and reserves unique resources (artefact, NPC slot) with a row lock; the loser of a conflict is kept as `conflicted` for GM arbitration.
 - Resolution modes: `manual` (GM), `assisted` (rules engine computes, GM approves flagged items), `auto` (only templates the GM marked low-risk). None require an LLM.
 - Close: summary report from the event log; GM publishes → proposals become canon in one transaction.
+- As built (Milestone 8, `downtime.js`): the clock is `campaign.clock = { day }` (whole days, no modes or jobs yet); it moves only by a GM jump or a downtime publish. Unique resources are free-text `claim`s compared case-insensitively; with one process per database (store.js) the in-memory check is the lock. Minutes and `clock.advance` jobs arrive with NPC simulation (Milestone 9).
 
 ## 8. NPC behaviour and simulation
 

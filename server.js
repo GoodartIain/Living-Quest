@@ -10,6 +10,8 @@ const characters = require('./characters.js');
 const chat = require('./chat.js');
 const voice = require('./voice.js');
 const broadcast = require('./broadcast.js');
+const downtime = require('./downtime.js');
+const rules = require('./rulesets/srd-5.2.1.js');
 
 const ADVANCEMENT = ['milestone', 'xp'];
 const AUTONOMY = ['static', 'scheduled', 'reactive', 'simulated', 'ai-assisted'];
@@ -261,6 +263,7 @@ function createApp({ store = memoryStore(), env = process.env } = {}) {
         voice: { spectators: 'none', muted: [] },
         director: { liveSceneId: null, notes: '', beats: [] },
         broadcast: { enabled: false, keyHash: null, sceneId: null, title: '', showInitiative: true, showRolls: true },
+        clock: { day: 0 },
       };
       db.campaigns.push(campaign);
       record(u.id, 'campaign.created', { campaignId: campaign.id, advancement: campaign.advancement });
@@ -396,7 +399,8 @@ function createApp({ store = memoryStore(), env = process.env } = {}) {
   hooks.onScene = cast.onScene;
   Object.assign(routes, cast.routes);
   const calls = voice({ db, find, fail, need, record, check, env });
-  Object.assign(routes, table2d.routes, chars.routes, talk.routes, calls.routes);
+  const later = downtime({ db, find, fail, need, record, id, check, rules, chars });
+  Object.assign(routes, table2d.routes, chars.routes, talk.routes, calls.routes, later.routes);
 
   // GM edits for locations and maps: field whitelist. Ids never change, so renames never break links.
   const EDITABLE = {

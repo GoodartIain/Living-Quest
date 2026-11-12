@@ -33,6 +33,8 @@
   .modes button[aria-pressed=true] { outline:2px solid var(--fg); }
   .turn { font-weight:600; }
   .note { background:var(--note); border-radius:6px; padding:8px; margin:8px 0; }
+  .dt-strip { display:flex; gap:1px; margin:4px 0; } .dt-strip span { flex:1; min-width:3px; height:14px; background:#8883; border-radius:2px; }
+  .dt-strip .on { background:#5a8f5a; } .dt-strip .proposed, .dt-strip .resolved { background:#c9a227; } .dt-strip .conflicted { background:#c0504d; }
   .prose p { white-space:pre-wrap; margin:6px 0; }
   ul { padding-left:18px; margin:4px 0; }
   details { margin-top:8px; } summary { cursor:pointer; color:var(--accent); }
@@ -70,6 +72,7 @@
 <script src="sheet.js"></script>
 <script src="chat.js"></script>
 <script src="director.js"></script>
+<script src="downtime.js"></script>
 <script src="vendor/livekit-client.umd.js"></script>
 <script src="voice.js"></script>
 <script>
@@ -144,7 +147,7 @@ async function render() {
 async function openWorld(id) {
   state.world = await api('GET', `/api/worlds/${id}`);
   state.pages = await api('GET', `/api/worlds/${id}/pages`);
-  state.results = null; state.wizard = null; state.character = null; state.director = null;
+  state.results = null; state.wizard = null; state.character = null; state.director = null; state.downtime = null;
   await Promise.all([loadCharacters(), loadRules()]);
   startChat(state.world.campaigns[0] && state.world.campaigns[0].id);
   await go(state.world.rootLocationId);
@@ -172,6 +175,7 @@ function renderWorld() {
   const w = state.world, v = state.loc, gm = w.role === 'gm';
   if (state.scene) return renderScene();
   if (state.director) return renderDirector();
+  if (state.downtime) return renderDowntime();
   if (state.wizard) return renderWizard();
   if (state.character) return renderSheet();
   const banner = liveBanner();
@@ -179,7 +183,8 @@ function renderWorld() {
   $app.append(h('section', {},
     h('div', { class: 'crumbs' }, h('button', { class: 'link', onclick: () => { state.world = null; render(); } }, 'All worlds'), '›', h('strong', {}, w.name), h('span', {}, `(${w.role})`)),
     h('p', { class: 'muted' }, `Ruleset ${w.settings.ruleset} · default advancement ${w.settings.advancement} · NPC autonomy ${w.settings.npcAutonomy}`),
-    gm ? campaignsPanel(w) : h('p', { class: 'muted' }, 'Campaigns: ' + w.campaigns.map((c) => `${c.name} (${c.advancement.mode})`).join(', ')),
+    gm ? campaignsPanel(w) : h('p', { class: 'muted' }, 'Campaigns: ', w.campaigns.map((c, i) => [i ? ', ' : '', `${c.name} (${c.advancement.mode}) `,
+      w.role === 'player' && h('button', { class: 'link', onclick: () => openDowntime(c.id) }, 'downtime')])),
     h('form', { role: 'search', onsubmit: onSubmit(async (f) => { state.results = await api('GET', `/api/worlds/${w.id}/pages?q=${encodeURIComponent(f.q)}`); render(); }) },
       field('Search the wiki (empty lists all)', h('input', { name: 'q', type: 'search' })), h('button', {}, 'Search')),
     state.results && h('div', {}, state.results.length
@@ -236,6 +241,7 @@ function campaignsPanel(w) {
         await openWorld(w.id);
       }) }, 'switch mode'), ' · ',
       h('button', { class: 'link', onclick: () => openDirector(c.id) }, 'director'), ' · ',
+      h('button', { class: 'link', onclick: () => openDowntime(c.id) }, 'downtime'), ' · ',
       h('button', { class: 'link', onclick: () => run(async () => { const r = await api('POST', `/api/campaigns/${c.id}/invites`, { role: 'player' }); prompt('Player invite code (single use):', r.code); }) }, 'invite player'), ' · ',
       h('button', { class: 'link', onclick: () => run(async () => { const r = await api('POST', `/api/campaigns/${c.id}/invites`, { role: 'spectator' }); prompt('Spectator invite code (single use):', r.code); }) }, 'invite spectator')))),
     h('form', { onsubmit: onSubmit(async (f) => { await api('POST', `/api/worlds/${w.id}/campaigns`, f.advancement ? f : { name: f.name }); await openWorld(w.id); }) },
