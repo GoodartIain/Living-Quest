@@ -295,5 +295,5 @@ module.exports = function downtime({ db, find, fail, need, record, id, check, ru
     },
   };
 
-  return { routes, label };
+  return { routes, label, moveClock, windowOpen };
 };

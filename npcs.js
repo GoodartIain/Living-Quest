@@ -183,6 +183,25 @@ module.exports = function npcs({ db, find, fail, need, record, id, check, viewer
     return { kind, reacted };
   }
 
+  // Put an NPC somewhere for a while (GM, or a committed world development); it resumes its routine afterwards.
+  function override(c, n, b, by, cause) {
+    const locationId = locIn(n.worldId, b.locationId, 'location');
+    const T = nowOf(c);
+    const e = { id: id(), worldId: n.worldId, campaignId: c.id, npcId: n.id, kind: 'override', cause, fromTime: T, toTime: T + num(b.minutes ?? 60, 'minutes', 1, 365 * DAY, true),
+      activity: str(b.activity, 'activity', 80), locationId, ...spot(n.worldId, b, locationId), after: 'resume', relocate: null };
+    db.npcEvents.push(e);
+    log(c, n.id, T, 'override', `${cause === 'gm' ? 'GM' : cause}: ${n.name} ${e.activity.toLowerCase()} at ${placeName(locationId)} until ${hhmm(e.toTime % DAY)}`, locationId);
+    record(by, 'npc.override', { npcId: n.id, campaignId: c.id, until: e.toTime, cause });
+    if (tokenCampaign(c.worldId) === c) syncTokens(c.worldId);
+  }
+  // For previews: who would react to an event at time T, without changing anything.
+  function wouldReact(c, kindIn, where, T) {
+    const kind = String(kindIn).toLowerCase();
+    return db.npcs.filter((n) => n.worldId === c.worldId && atLeast(n, 'reactive') && n.reactions.some((r) => r.on === kind))
+      .filter((n) => { const s = stateAt(n, c, T); return !where || (s.locationId && within(s.locationId, where)); })
+      .map((n) => `${n.name}: ${n.reactions.find((r) => r.on === kind).activity.toLowerCase()}`);
+  }
+
   function fields(w, b, n = {}) {
     const out = {};
     if (b.pageId !== undefined) {
@@ -266,14 +285,7 @@ module.exports = function npcs({ db, find, fail, need, record, id, check, viewer
       const n = find('npcs', p.id);
       need(u, n.worldId, 'gm');
       const c = campaignIn(worldOf(n), b.campaignId);
-      const locationId = locIn(n.worldId, b.locationId, 'location');
-      const T = nowOf(c);
-      const e = { id: id(), worldId: n.worldId, campaignId: c.id, npcId: n.id, kind: 'override', cause: 'gm', fromTime: T, toTime: T + num(b.minutes ?? 60, 'minutes', 1, 365 * DAY, true),
-        activity: str(b.activity, 'activity', 80), locationId, ...spot(n.worldId, b, locationId), after: 'resume', relocate: null };
-      db.npcEvents.push(e);
-      log(c, n.id, T, 'override', `GM: ${n.name} ${e.activity.toLowerCase()} at ${placeName(locationId)} until ${hhmm(e.toTime % DAY)}`, locationId);
-      record(u.id, 'npc.override', { npcId: n.id, campaignId: c.id, until: e.toTime });
-      if (tokenCampaign(c.worldId) === c) syncTokens(c.worldId);
+      override(c, n, b, u.id, 'gm');
       return view(n, c);
     },
 
@@ -287,5 +299,5 @@ module.exports = function npcs({ db, find, fail, need, record, id, check, viewer
     },
   };
 
-  return { routes, onClock, hereFor, syncTokens, stateAt, hhmm, worldEvent, tokenCampaign, campaignFor };
+  return { routes, onClock, hereFor, syncTokens, stateAt, hhmm, worldEvent, tokenCampaign, campaignFor, override, wouldReact, placeName };
 };

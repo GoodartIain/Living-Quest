@@ -58,6 +58,10 @@ test('everything survives a restart exactly', { skip }, async () => {
   await a.ok('POST', `/api/downtime/${dt.id}/actions`, { characterId: ch.id, activity: 'ledger', startDay: dt.startDay + 8 }, pl);
   const runId = (await a.ok('GET', `/api/campaigns/${c.id}/downtime`, null, pl)).windows[0].actions.find((x) => x.runId).runId;
   await a.ok('POST', `/api/quest-runs/${runId}/choose`, { index: 0 }, pl);
+  const fac = await a.ok('POST', `/api/worlds/${w.id}/factions`, { name: 'Guild', territory: [town.id], standings: { party: 5 },
+    activities: [{ name: 'Grow', every: 1, effects: [{ kind: 'influence', delta: 1 }, { kind: 'rumour', text: 'Busy guild' }] }] }, gm);
+  await a.ok('POST', `/api/campaigns/${c.id}/happenings`, { inDays: 20, label: 'Later', effects: [{ kind: 'resources', factionId: fac.id, delta: 5 }] }, gm);
+  await a.ok('POST', `/api/campaigns/${c.id}/world-changes`, { effects: [{ kind: 'standing', factionId: fac.id, target: 'party', delta: 7 }] }, gm);
   await a.ok('POST', `/api/scenes/${scene.id}/triggers`, { name: 'Lever', x: 2, y: 2, revealFog: { x0: 3, y0: 3, x1: 4, y1: 4 }, event: { kind: 'alarm' } }, gm);
   const before = JSON.stringify(a.app.db);
   await a.close();
@@ -75,6 +79,7 @@ test('everything survives a restart exactly', { skip }, async () => {
     assert.equal(mara.name, 'Mara');
     assert.equal((await b.ok('GET', `/api/quest-runs/${runId}`, null, pl)).effects.find((e) => e.type === 'item').status, 'pending');
     assert.equal((await b.ok('GET', `/api/scenes/${scene.id}`, null, gm)).triggers[0].event.kind, 'alarm');
+    assert.equal((await b.ok('GET', `/api/campaigns/${c.id}/world`, null, gm)).factions[0].current.standings.party, 12);
   } finally { await b.close(); }
 });
 

@@ -177,6 +177,8 @@ interface Zone { id; polygon: Vec3[]; trigger: Interaction[] }
 - Preview: run `advance` against a forked snapshot, show diff, commit or discard.
 - As built (Milestone 9, `npcs.js`): layers 1–2 only. Campaign time is `{ day, minute }`. An NPC's state at time T is a pure function of its schedule, the campaign's reaction/override records (`npc_events`, append-only) and T, so no NPC is simulated between clock moves; each clock move logs the transitions it skipped over (`npc_log`; jumps over 3 days log one summary per NPC) and syncs NPC tokens for scenes. 'Relocate' reactions rewrite routine steps from the moment they end. Players see an NPC only through the usual visibility rules (NPC visibility, location visibility, fog on scenes).
 
+- As built (Milestone 11, `world.js`): factions keep starting values; `world_changes` (append-only) holds every later change with provenance, so a campaign's state is a replay. Faction activities are bounded rules evaluated per day with a seeded chance (`sha256(campaign, faction, activity, day)`), so a preview is deterministic. Commit recomputes and compares a fingerprint of the draft (developments, decisions, change count, faction and happening definitions) before applying anything, then steps the clock to each development so NPC routines and reactions stay consistent.
+
 ## 9. Spectator security
 
 - Spectator is a server role (implemented: sees only `public` locations, no gm notes, no write routes).

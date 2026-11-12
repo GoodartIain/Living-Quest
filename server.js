@@ -14,6 +14,7 @@ const downtime = require('./downtime.js');
 const npcModule = require('./npcs.js');
 const questModule = require('./quests.js');
 const triggerModule = require('./triggers.js');
+const worldModule = require('./world.js');
 const rules = require('./rulesets/srd-5.2.1.js');
 
 const ADVANCEMENT = ['milestone', 'xp'];
@@ -408,7 +409,8 @@ function createApp({ store = memoryStore(), env = process.env } = {}) {
   hooks.sceneTriggers = scenery.forScene;
   const sideQuests = questModule({ db, find, fail, need, record, id, check, rules, chars, people });
   const later = downtime({ db, find, fail, need, record, id, check, rules, chars, onClock: people.onClock, adventures: sideQuests });
-  Object.assign(routes, table2d.routes, chars.routes, talk.routes, calls.routes, later.routes, people.routes, sideQuests.routes, scenery.routes);
+  const sim = worldModule({ db, find, fail, need, record, id, check, SEES, VISIBILITY, people, clock: later });
+  Object.assign(routes, table2d.routes, chars.routes, talk.routes, calls.routes, later.routes, people.routes, sideQuests.routes, scenery.routes, sim.routes);
 
   // GM edits for locations and maps: field whitelist. Ids never change, so renames never break links.
   const EDITABLE = {
