@@ -38,7 +38,7 @@ function startChat(campaignId) {
     const c = state.world && state.world.campaigns.find((x) => x.id === cid);
     if (!c) return;
     if (state.world.role === 'gm') c.director = { ...c.director, liveSceneId: sceneId }; else c.liveSceneId = sceneId;
-    if (!state.scene && !state.wizard && !state.character && !state.director && !state.downtime && !state.npcs) render();
+    if (!state.scene && !state.wizard && !state.character && !state.director && !state.downtime && !state.npcs && !state.quests) render();
   });
   es.addEventListener('deleted', (e) => { const { id } = JSON.parse(e.data); chat.messages = chat.messages.filter((x) => x.id !== id); drawChat(false); });
   $chatToggle.hidden = false;

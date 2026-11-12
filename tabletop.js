@@ -62,6 +62,7 @@ module.exports = function tabletop({ db, find, fail, need, viewer, record, id, S
         combatants: enc.combatants.filter((c) => ids.has(c.tokenId)),
       },
       rolls: hooks.sceneRolls(user, v.role, scene.id),
+      triggers: hooks.sceneTriggers ? hooks.sceneTriggers(v.role, scene, (x, y) => !scene.fog.enabled || revealed.has(`${x},${y}`)) : [],
     };
   }
 

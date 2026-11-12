@@ -146,15 +146,41 @@ module.exports = function npcs({ db, find, fail, need, record, id, check, viewer
   }
 
   // Players see an NPC at a place they can see, if the NPC's visibility allows, at their own campaign's time.
+  // The campaign whose clock a viewer lives in: the GM's is the token campaign, others their own campaign.
+  const campaignFor = (user, worldId, role) => (role === 'gm' ? tokenCampaign(worldId)
+    : db.campaigns.find((x) => x.worldId === worldId && (user.broadcast ? x.id === user.broadcast : db.memberships.some((m) => m.userId === user.id && m.campaignId === x.id))));
   function hereFor(user, loc) {
     const v = viewer(user, loc.worldId);
-    const c = v.role === 'gm' ? tokenCampaign(loc.worldId)
-      : db.campaigns.find((x) => x.worldId === loc.worldId && (user.broadcast ? x.id === user.broadcast : db.memberships.some((m) => m.userId === user.id && m.campaignId === x.id)));
+    const c = campaignFor(user, loc.worldId, v.role);
     if (!c) return [];
     const T = nowOf(c);
     return db.npcs.filter((n) => n.worldId === loc.worldId && SEES[v.role].includes(n.visibility)).map((n) => [n, stateAt(n, c, T)])
       .filter(([, s]) => s.locationId === loc.id)
       .map(([n, s]) => ({ id: n.id, name: n.name, occupation: n.occupation, activity: s.activity, pageId: n.pageId && v.seesPage(find('pages', n.pageId)) ? n.pageId : null }));
+  }
+
+  // Also used by side-quest outcomes and scene triggers (Milestone 10). `by` is the actor recorded in the audit log.
+  function worldEvent(c, by, kindIn, locationIn, note, cause = 'gm') {
+    const kind = str(kindIn, 'event name', 40).toLowerCase();
+    const where = locationIn == null ? null : locIn(c.worldId, locationIn, 'event location');
+    const T = nowOf(c);
+    log(c, null, T, 'event', `${kind}${where ? ` at ${placeName(where)}` : ''}${note ? `: ${String(note).slice(0, 200)}` : ''}${cause === 'gm' ? '' : ` (${cause})`}`, where);
+    const reacted = [];
+    for (const n of db.npcs.filter((x) => x.worldId === c.worldId && atLeast(x, 'reactive'))) {
+      const r = n.reactions.find((x) => x.on === kind);
+      const s = stateAt(n, c, T);
+      if (!r || (where && !(s.locationId && within(s.locationId, where)))) continue;
+      const locationId = r.locationId === 'stay' ? s.locationId : r.locationId === 'home' ? n.homeLocationId : r.locationId;
+      const e = { id: id(), worldId: c.worldId, campaignId: c.id, npcId: n.id, kind: 'reaction', cause: kind, fromTime: T, toTime: T + r.minutes,
+        activity: r.activity, locationId, ...(r.locationId === 'stay' ? { sceneId: s.sceneId, x: s.x, y: s.y } : { sceneId: r.sceneId, x: r.x, y: r.y }),
+        after: r.then, relocate: r.relocate };
+      db.npcEvents.push(e);
+      log(c, n.id, T, 'reacted', `${n.name} reacts to the ${kind}: ${r.activity.toLowerCase()} at ${placeName(locationId)} until ${hhmm(e.toTime % DAY)}`, locationId);
+      reacted.push({ npcId: n.id, name: n.name, activity: r.activity, until: e.toTime });
+    }
+    record(by, 'world.event', { campaignId: c.id, kind, locationId: where, cause, reacted: reacted.map((x) => x.npcId) });
+    if (tokenCampaign(c.worldId) === c) syncTokens(c.worldId);
+    return { kind, reacted };
   }
 
   function fields(w, b, n = {}) {
@@ -194,7 +220,8 @@ module.exports = function npcs({ db, find, fail, need, record, id, check, viewer
           return { id: l.id, name: path.join(' › ') };
         }).sort((a, b) => a.name.localeCompare(b.name)),
         scenes: db.scenes.filter((x) => x.worldId === w.id).map((x) => ({ id: x.id, name: x.name, locationId: x.locationId, cols: x.cols, rows: x.rows })),
-        pages: db.pages.filter((x) => x.worldId === w.id && x.kind === 'npc').map((x) => ({ id: x.id, title: x.title })) };
+        pages: db.pages.filter((x) => x.worldId === w.id && x.kind === 'npc').map((x) => ({ id: x.id, title: x.title })),
+        allPages: db.pages.filter((x) => x.worldId === w.id && !x.locationId).map((x) => ({ id: x.id, title: x.title })) };
     },
     'POST /api/worlds/:id/npcs': (u, b, p) => {
       need(u, p.id, 'gm');
@@ -231,26 +258,7 @@ module.exports = function npcs({ db, find, fail, need, record, id, check, viewer
     'POST /api/campaigns/:id/events': (u, b, p) => {
       const c = find('campaigns', p.id);
       need(u, c.worldId, 'gm');
-      const kind = str(b.kind, 'event name', 40).toLowerCase();
-      const where = b.locationId == null ? null : locIn(c.worldId, b.locationId, 'event location');
-      const T = nowOf(c);
-      log(c, null, T, 'event', `${kind}${where ? ` at ${placeName(where)}` : ''}${b.note ? `: ${String(b.note).slice(0, 200)}` : ''}`, where);
-      const reacted = [];
-      for (const n of db.npcs.filter((x) => x.worldId === c.worldId && atLeast(x, 'reactive'))) {
-        const r = n.reactions.find((x) => x.on === kind);
-        const s = stateAt(n, c, T);
-        if (!r || (where && !(s.locationId && within(s.locationId, where)))) continue;
-        const locationId = r.locationId === 'stay' ? s.locationId : r.locationId === 'home' ? n.homeLocationId : r.locationId;
-        const e = { id: id(), worldId: c.worldId, campaignId: c.id, npcId: n.id, kind: 'reaction', cause: kind, fromTime: T, toTime: T + r.minutes,
-          activity: r.activity, locationId, ...(r.locationId === 'stay' ? { sceneId: s.sceneId, x: s.x, y: s.y } : { sceneId: r.sceneId, x: r.x, y: r.y }),
-          after: r.then, relocate: r.relocate };
-        db.npcEvents.push(e);
-        log(c, n.id, T, 'reacted', `${n.name} reacts to the ${kind}: ${r.activity.toLowerCase()} at ${placeName(locationId)} until ${hhmm(e.toTime % DAY)}`, locationId);
-        reacted.push({ npcId: n.id, name: n.name, activity: r.activity, until: e.toTime });
-      }
-      record(u.id, 'world.event', { campaignId: c.id, kind, locationId: where, reacted: reacted.map((x) => x.npcId) });
-      if (tokenCampaign(c.worldId) === c) syncTokens(c.worldId);
-      return { kind, reacted };
+      return worldEvent(c, u.id, b.kind, b.locationId, b.note);
     },
 
     // GM override: put an NPC somewhere for a while, whatever its autonomy; it resumes its routine afterwards.
@@ -279,5 +287,5 @@ module.exports = function npcs({ db, find, fail, need, record, id, check, viewer
     },
   };
 
-  return { routes, onClock, hereFor, syncTokens, stateAt, hhmm };
+  return { routes, onClock, hereFor, syncTokens, stateAt, hhmm, worldEvent, tokenCampaign, campaignFor };
 };

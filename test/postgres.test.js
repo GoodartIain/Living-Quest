@@ -49,8 +49,16 @@ test('everything survives a restart exactly', { skip }, async () => {
     reactions: [{ on: 'fire', activity: 'Fleeing', locationId: 'home', minutes: 30, then: 'relocate', relocate: { from: town.id, to: town.id } }], autonomy: 'reactive' }, gm);
   await a.ok('POST', `/api/campaigns/${c.id}/clock`, { until: '10:00' }, gm);
   await a.ok('POST', `/api/campaigns/${c.id}/events`, { kind: 'fire' }, gm);
-  const dt = await a.ok('POST', `/api/campaigns/${c.id}/downtime`, { duration: 1, activities: ['work'] }, gm);
+  const dt = await a.ok('POST', `/api/campaigns/${c.id}/downtime`, { duration: 10, activities: ['work'] }, gm);
   await a.ok('POST', `/api/downtime/${dt.id}/actions`, { characterId: ch.id, activity: 'work', startDay: dt.startDay }, gm).catch(() => {});
+  const quest = await a.ok('POST', `/api/campaigns/${c.id}/quests`, { title: 'Find the ledger', kind: 'personal', characterId: ch.id, objectives: [{ text: 'Search' }] }, gm);
+  const adv = await a.ok('POST', `/api/worlds/${w.id}/adventures`, { title: 'Ledger', nodes: { start: { text: 'Go?', choices: [{ label: 'Look', check: 'skill:Stealth', dc: 1, success: 'end', failure: 'end' }] },
+    end: { text: 'Found', effects: [{ type: 'quest', questId: quest.id, objectiveId: quest.objectives[0].id }, { type: 'item', name: 'Ledger', major: true }] } } }, gm);
+  await a.ok('PATCH', `/api/downtime/${dt.id}`, { activities: ['work', { key: 'ledger', name: 'Ledger', days: 1, adventureId: adv.id }] }, gm);
+  await a.ok('POST', `/api/downtime/${dt.id}/actions`, { characterId: ch.id, activity: 'ledger', startDay: dt.startDay + 8 }, pl);
+  const runId = (await a.ok('GET', `/api/campaigns/${c.id}/downtime`, null, pl)).windows[0].actions.find((x) => x.runId).runId;
+  await a.ok('POST', `/api/quest-runs/${runId}/choose`, { index: 0 }, pl);
+  await a.ok('POST', `/api/scenes/${scene.id}/triggers`, { name: 'Lever', x: 2, y: 2, revealFog: { x0: 3, y0: 3, x1: 4, y1: 4 }, event: { kind: 'alarm' } }, gm);
   const before = JSON.stringify(a.app.db);
   await a.close();
 
@@ -65,6 +73,8 @@ test('everything survives a restart exactly', { skip }, async () => {
     assert.equal((await b.ok('GET', `/api/worlds/${w.id}/npcs`, null, gm)).npcs[0].now.activity, 'Fleeing', 'reaction state survives');
     assert.ok((await b.ok('GET', `/api/campaigns/${c.id}/npc-log`, null, gm)).length >= 2);
     assert.equal(mara.name, 'Mara');
+    assert.equal((await b.ok('GET', `/api/quest-runs/${runId}`, null, pl)).effects.find((e) => e.type === 'item').status, 'pending');
+    assert.equal((await b.ok('GET', `/api/scenes/${scene.id}`, null, gm)).triggers[0].event.kind, 'alarm');
   } finally { await b.close(); }
 });
 

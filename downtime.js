@@ -17,7 +17,7 @@ const TEMPLATES = [
 const LIVE = ['proposed', 'resolved', 'conflicted', 'approved']; // statuses that occupy days and claims
 const UNRESOLVED = ['proposed', 'resolved', 'conflicted'];
 
-module.exports = function downtime({ db, find, fail, need, record, id, check, rules, chars, onClock = () => {} }) {
+module.exports = function downtime({ db, find, fail, need, record, id, check, rules, chars, onClock = () => {}, adventures = null }) {
   const { str, oneOf, num, bool } = check;
   const calendarOf = (c) => find('worlds', c.worldId).settings.calendar;
   function label(cal, day) {
@@ -39,7 +39,7 @@ module.exports = function downtime({ db, find, fail, need, record, id, check, ru
   const ownsCharacter = (u, ch) => ch.ownerId === u.id;
   const windowOpen = (camp) => db.downtimes.find((w) => w.campaignId === camp.id && (w.status === 'open' || w.status === 'paused'));
 
-  function validTemplates(list) {
+  function validTemplates(list, worldId) {
     if (!Array.isArray(list) || !list.length || list.length > 30) fail(400, 'activities: choose 1 to 30');
     const keys = new Set();
     return list.map((a) => {
@@ -47,13 +47,15 @@ module.exports = function downtime({ db, find, fail, need, record, id, check, ru
       const key = str(t.key, 'activity key', 40);
       if (!/^[a-z0-9-]+$/.test(key) || keys.has(key)) fail(400, 'activity keys must be unique lowercase words');
       keys.add(key);
-      const resolution = oneOf(t.resolution ?? 'manual', ['manual', 'assisted', 'auto'], 'resolution');
+      // A side quest activity plays a GM-authored adventure (quests.js) and resolves from it.
+      const adventureId = t.adventureId ? (adventures || fail(400, 'side quests are not available')).validAdventureId(worldId, t.adventureId) : null;
+      const resolution = adventureId ? 'adventure' : oneOf(t.resolution ?? 'manual', ['manual', 'assisted', 'auto'], 'resolution');
       const skill = t.skill == null ? null : rules.SKILLS[t.skill] ? t.skill : fail(400, `unknown skill ${t.skill}`);
       if (resolution === 'assisted' && !skill) fail(400, `${t.name}: assisted resolution needs a skill and DC`);
       return { key, name: str(t.name, 'activity name', 60), days: num(t.days, 'days', 1, 365, true), resolution, skill,
         dc: skill ? num(t.dc ?? 12, 'dc', 1, 40, true) : null, gpCost: num(t.gpCost ?? 0, 'gpCost', 0, 1e6, true),
         rewardGp: num(t.rewardGp ?? 0, 'rewardGp', 0, 1e6, true), rewardXp: num(t.rewardXp ?? 0, 'rewardXp', 0, 1e6, true),
-        rewardItem: t.rewardItem ? str(t.rewardItem, 'rewardItem', 80) : '', repeatable: t.repeatable !== false };
+        rewardItem: t.rewardItem ? str(t.rewardItem, 'rewardItem', 80) : '', repeatable: t.repeatable !== false, adventureId };
     });
   }
   // What a successful activity grants, before the GM edits it.
@@ -70,7 +72,8 @@ module.exports = function downtime({ db, find, fail, need, record, id, check, ru
       windows: db.downtimes.filter((w) => w.campaignId === c.id).map((w) => {
         // Players see only their own characters' activities and report lines; side quests stay private.
         const actions = db.downtimeActions.filter((a) => a.downtimeId === w.id && (gm || mine.has(a.characterId)))
-          .map((a) => ({ ...a, characterName: find('characters', a.characterId).name, startLabel: label(cal, a.startDay) }));
+          .map((a) => ({ ...a, characterName: find('characters', a.characterId).name, startLabel: label(cal, a.startDay),
+            runId: adventures && adventures.runFor(a) ? adventures.runFor(a).id : null }));
         const report = w.report && { ...w.report, characters: w.report.characters.filter((r) => gm || mine.has(r.characterId)) };
         return { ...w, startLabel: label(cal, w.startDay), endLabel: label(cal, w.endDay), actions, report };
       }),
@@ -126,7 +129,7 @@ module.exports = function downtime({ db, find, fail, need, record, id, check, ru
       const days = num(b.duration, 'duration', 1, 1000, true) * { days: 1, weeks: cal.daysPerWeek, months: cal.daysPerMonth }[unit];
       if (b.deadline != null && Number.isNaN(Date.parse(b.deadline))) fail(400, 'deadline must be a date');
       const w = { id: id(), worldId: c.worldId, campaignId: c.id, startDay: clockOf(c), endDay: clockOf(c) + days,
-        deadline: b.deadline ? new Date(b.deadline).toISOString() : null, activities: validTemplates(b.activities ?? TEMPLATES.map((t) => t.key)),
+        deadline: b.deadline ? new Date(b.deadline).toISOString() : null, activities: validTemplates(b.activities ?? TEMPLATES.map((t) => t.key), c.worldId),
         status: 'open', report: null, createdBy: u.id, publishedAt: null };
       db.downtimes.push(w);
       record(u.id, 'downtime.created', { downtimeId: w.id, startDay: w.startDay, endDay: w.endDay });
@@ -140,7 +143,7 @@ module.exports = function downtime({ db, find, fail, need, record, id, check, ru
       if (!['open', 'paused'].includes(w.status)) fail(409, `this downtime is ${w.status}`);
       if (b.status !== undefined) {
         const status = oneOf(b.status, ['open', 'paused', 'cancelled'], 'status');
-        if (status === 'cancelled') for (const a of liveActions(w)) a.status = 'cancelled';
+        if (status === 'cancelled') for (const a of liveActions(w)) { a.status = 'cancelled'; if (adventures) adventures.abandon(a); }
         w.status = status;
       }
       if (b.endDay !== undefined) {
@@ -149,7 +152,7 @@ module.exports = function downtime({ db, find, fail, need, record, id, check, ru
         if (endDay < latest) fail(409, 'booked activities run past that day; reject or cancel them first');
         w.endDay = endDay;
       }
-      if (b.activities !== undefined) w.activities = validTemplates(b.activities);
+      if (b.activities !== undefined) w.activities = validTemplates(b.activities, w.worldId);
       record(u.id, 'downtime.updated', { downtimeId: w.id, status: w.status, endDay: w.endDay });
       return w;
     },
@@ -174,7 +177,7 @@ module.exports = function downtime({ db, find, fail, need, record, id, check, ru
       const claim = b.claim ? str(b.claim, 'claim', 80).toLowerCase() : null;
       const a = { id: id(), worldId: w.worldId, downtimeId: w.id, campaignId: c.id, characterId: ch.id, userId: u.id, activity: t.key,
         startDay, days: t.days, details: typeof b.details === 'string' ? b.details.slice(0, 2000) : '', claim, status: 'proposed', outcome: null, gmNotes: '', decidedBy: null };
-      if (t.resolution !== 'manual') { // assisted or auto: roll now from the sheet; auto is pre-approved within the GM's preset rewards
+      if (t.resolution === 'assisted' || t.resolution === 'auto') { // roll now from the sheet; auto is pre-approved within the GM's preset rewards
         const roll = t.skill ? chars.rollCheck(u, ch, `skill:${t.skill}`) : null;
         const success = roll ? roll.total >= t.dc : true;
         a.outcome = { roll: roll && { formula: roll.formula, total: roll.total, dc: t.dc }, success, notes: '', ...rewardsOf(t, success) };
@@ -185,6 +188,7 @@ module.exports = function downtime({ db, find, fail, need, record, id, check, ru
         for (const r of [...rivals, a]) r.status = 'conflicted';
       }
       db.downtimeActions.push(a);
+      if (t.adventureId) adventures.startRun(u, a, t.adventureId);
       record(u.id, 'downtime.action', { downtimeId: w.id, actionId: a.id, characterId: ch.id, activity: t.key, startDay, status: a.status });
       return a;
     },
@@ -196,6 +200,7 @@ module.exports = function downtime({ db, find, fail, need, record, id, check, ru
       if (!isGm(u, c) && !ownsCharacter(u, find('characters', a.characterId))) fail(403, 'not your activity');
       if (find('downtimes', a.downtimeId).status === 'published' || a.status === 'approved' && !isGm(u, c)) fail(409, 'this activity is already decided');
       a.status = 'cancelled';
+      if (adventures) adventures.abandon(a);
       record(u.id, 'downtime.action.cancelled', { actionId: a.id });
       return a;
     },
@@ -215,16 +220,20 @@ module.exports = function downtime({ db, find, fail, need, record, id, check, ru
           rewardItem: o.rewardItem ? str(o.rewardItem, 'rewardItem', 80) : '' };
       }
       if (status === 'approved' && !a.outcome) fail(400, 'give an outcome when approving a manual activity');
+      const blocked = status === 'approved' && adventures && adventures.blockApproval(a);
+      if (blocked) fail(409, blocked);
       if (b.gmNotes !== undefined) a.gmNotes = typeof b.gmNotes === 'string' ? b.gmNotes.slice(0, 2000) : '';
       const lost = [];
       if (status === 'approved' && a.claim) { // arbitration: the other claimants lose the unique resource
         for (const r of liveActions(w).filter((x) => x.claim === a.claim && x.id !== a.id)) {
           r.status = 'rejected';
+          if (adventures) adventures.abandon(r);
           r.gmNotes = `${a.claim} went to ${find('characters', a.characterId).name}.`;
           lost.push(r.id);
         }
       }
       a.status = status === 'proposed' ? (a.outcome ? 'resolved' : 'proposed') : status;
+      if (status === 'rejected' && adventures) adventures.abandon(a);
       a.decidedBy = u.id;
       record(u.id, 'downtime.decision', { actionId: a.id, status: a.status, outcome: a.outcome, rejectedRivals: lost });
       return a;
@@ -262,7 +271,12 @@ module.exports = function downtime({ db, find, fail, need, record, id, check, ru
         if (xpMode && s.xp) chars.giveXp(ch, s.xp, 'downtime', `Downtime, ${label(calendarOf(c), w.startDay)} to ${label(calendarOf(c), w.endDay)}`, u.id);
         chars.sync(ch);
       }
-      for (const a of open) a.status = 'cancelled';
+      for (const a of open) { a.status = 'cancelled'; if (adventures) adventures.abandon(a); }
+      w.status = 'published';
+      w.publishedAt = new Date().toISOString();
+      moveClock(c, w.endDay, c.clock.minute); // in-game time moves only now, when the GM publishes
+      // Side-quest outcomes (discoveries, items, quests, world events…) land after the clock moved, so NPCs react at the new time.
+      const effects = new Map(approved.map((a) => [a.id, adventures ? adventures.apply(a, c, u.id) : []]));
       const cal = calendarOf(c);
       w.report = {
         from: label(cal, w.startDay), to: label(cal, w.endDay), days: w.endDay - w.startDay, cancelled: open.length,
@@ -273,12 +287,9 @@ module.exports = function downtime({ db, find, fail, need, record, id, check, ru
           return { characterId: cid, name: ch.name, gp: s.gp, xp: xpMode ? s.xp : 0, items: s.items,
             timeline: all.filter((a) => a.characterId === cid).sort((x, y) => x.startDay - y.startDay).map((a) => ({
               activity: w.activities.find((x) => x.key === a.activity).name, from: label(cal, a.startDay), days: a.days, status: a.status,
-              success: a.outcome ? a.outcome.success : null, notes: a.outcome ? a.outcome.notes : '' })) };
+              success: a.outcome ? a.outcome.success : null, notes: a.outcome ? a.outcome.notes : '', effects: effects.get(a.id) || [] })) };
         }),
       };
-      w.status = 'published';
-      w.publishedAt = new Date().toISOString();
-      moveClock(c, w.endDay, c.clock.minute); // in-game time moves only now, when the GM publishes
       record(u.id, 'downtime.published', { downtimeId: w.id, day: w.endDay, approved: approved.length, cancelled: open.length });
       return w;
     },

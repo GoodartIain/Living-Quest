@@ -33,11 +33,15 @@ const SPEC = {
   npcs: ['id', 'worldId', 'pageId', 'name', 'occupation', 'homeLocationId', 'visibility', 'autonomy', 'importance', 'color', 'schedule', 'reactions'],
   npcEvents: ['id', 'worldId', 'campaignId', 'npcId', 'kind', 'cause', 'fromTime', 'toTime', 'activity', 'locationId', 'sceneId', 'x', 'y', 'after', 'relocate'],
   npcLog: ['id', 'worldId', 'campaignId', 'npcId', 'time', 'kind', 'text', 'locationId'],
+  quests: ['id', 'worldId', 'campaignId', 'title', 'description', 'notes', 'kind', 'visibility', 'status', 'characterId', 'objectives'],
+  adventures: ['id', 'worldId', 'title', 'summary', 'start', 'nodes', 'maxGp', 'maxXp'],
+  questRuns: ['id', 'worldId', 'campaignId', 'adventureId', 'characterId', 'userId', 'actionId', 'node', 'status', 'path', 'effects', 'question', 'answer', 'outcome'],
+  triggers: ['id', 'worldId', 'sceneId', 'name', 'text', 'x', 'y', 'visibility', 'once', 'revealFog', 'showTokenId', 'event', 'usedAt'],
   rolls: ['id', 'worldId', 'sceneId', 'userId', 'userName', 'characterId', 'label', 'visibility', 'formula', 'mode', 'total', 'parts', 'at'],
   events: ['seq', 'at', 'actor', 'type', 'data'],
 };
 const COLLECTIONS = Object.keys(SPEC);
-const JSON_FIELDS = new Set(['settings', 'advancement', 'voice', 'director', 'walls', 'broadcast', 'clock', 'activities', 'schedule', 'reactions', 'relocate', 'report', 'outcome', 'fog', 'encounter', 'controlledBy', 'data', 'baseScores', 'backgroundBonus',
+const JSON_FIELDS = new Set(['settings', 'advancement', 'voice', 'director', 'walls', 'broadcast', 'clock', 'activities', 'schedule', 'reactions', 'relocate', 'objectives', 'nodes', 'path', 'effects', 'revealFog', 'event', 'report', 'outcome', 'fog', 'encounter', 'controlledBy', 'data', 'baseScores', 'backgroundBonus',
   'abilities', 'skills', 'feats', 'tools', 'hp', 'conditions', 'inventory', 'currency', 'parts', 'weapons', 'spells', 'slotsUsed', 'masteries', 'deathSaves', 'journal', 'choices', 'multiclass', 'toUserIds', 'toNames']);
 const APPEND_ONLY = new Set(['npcEvents', 'npcLog', 'events', 'revisions', 'advancements', 'rolls', 'messages', 'chatDeletions']);
 const keyOf = (c) => (c === 'events' ? 'seq' : 'id');

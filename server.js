@@ -12,6 +12,8 @@ const voice = require('./voice.js');
 const broadcast = require('./broadcast.js');
 const downtime = require('./downtime.js');
 const npcModule = require('./npcs.js');
+const questModule = require('./quests.js');
+const triggerModule = require('./triggers.js');
 const rules = require('./rulesets/srd-5.2.1.js');
 
 const ADVANCEMENT = ['milestone', 'xp'];
@@ -402,8 +404,11 @@ function createApp({ store = memoryStore(), env = process.env } = {}) {
   Object.assign(routes, cast.routes);
   const calls = voice({ db, find, fail, need, record, check, env });
   const people = npcModule({ db, find, fail, need, record, id, check, viewer, SEES, VISIBILITY, publishScene: table2d.publish });
-  const later = downtime({ db, find, fail, need, record, id, check, rules, chars, onClock: people.onClock });
-  Object.assign(routes, table2d.routes, chars.routes, talk.routes, calls.routes, later.routes, people.routes);
+  const scenery = triggerModule({ db, find, fail, need, record, id, check, VISIBILITY, SEES, publishScene: table2d.publish, people });
+  hooks.sceneTriggers = scenery.forScene;
+  const sideQuests = questModule({ db, find, fail, need, record, id, check, rules, chars, people });
+  const later = downtime({ db, find, fail, need, record, id, check, rules, chars, onClock: people.onClock, adventures: sideQuests });
+  Object.assign(routes, table2d.routes, chars.routes, talk.routes, calls.routes, later.routes, people.routes, sideQuests.routes, scenery.routes);
 
   // GM edits for locations and maps: field whitelist. Ids never change, so renames never break links.
   const EDITABLE = {

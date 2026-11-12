@@ -76,6 +76,8 @@
 <script src="director.js"></script>
 <script src="downtime.js"></script>
 <script src="npcs.js"></script>
+<script src="quests.js"></script>
+<script src="triggers.js"></script>
 <script src="vendor/livekit-client.umd.js"></script>
 <script src="voice.js"></script>
 <script>
@@ -150,7 +152,7 @@ async function render() {
 async function openWorld(id) {
   state.world = await api('GET', `/api/worlds/${id}`);
   state.pages = await api('GET', `/api/worlds/${id}/pages`);
-  state.results = null; state.wizard = null; state.character = null; state.director = null; state.downtime = null; state.npcs = false;
+  state.results = null; state.wizard = null; state.character = null; state.director = null; state.downtime = null; state.npcs = false; state.quests = null;
   await Promise.all([loadCharacters(), loadRules()]);
   startChat(state.world.campaigns[0] && state.world.campaigns[0].id);
   await go(state.world.rootLocationId);
@@ -180,6 +182,7 @@ function renderWorld() {
   if (state.director) return renderDirector();
   if (state.downtime) return renderDowntime();
   if (state.npcs) return renderNpcs();
+  if (state.quests) return renderQuests();
   if (state.wizard) return renderWizard();
   if (state.character) return renderSheet();
   const banner = liveBanner();
@@ -188,7 +191,7 @@ function renderWorld() {
     h('div', { class: 'crumbs' }, h('button', { class: 'link', onclick: () => { state.world = null; render(); } }, 'All worlds'), '›', h('strong', {}, w.name), h('span', {}, `(${w.role})`)),
     h('p', { class: 'muted' }, `Ruleset ${w.settings.ruleset} · default advancement ${w.settings.advancement} · NPC autonomy ${w.settings.npcAutonomy}`),
     gm ? campaignsPanel(w) : h('p', { class: 'muted' }, 'Campaigns: ', w.campaigns.map((c, i) => [i ? ', ' : '', `${c.name} (${c.advancement.mode}) `,
-      w.role === 'player' && h('button', { class: 'link', onclick: () => openDowntime(c.id) }, 'downtime')])),
+      w.role === 'player' && [h('button', { class: 'link', onclick: () => openDowntime(c.id) }, 'downtime'), ' ', h('button', { class: 'link', onclick: () => openQuests(c.id) }, 'quests')]])),
     h('form', { role: 'search', onsubmit: onSubmit(async (f) => { state.results = await api('GET', `/api/worlds/${w.id}/pages?q=${encodeURIComponent(f.q)}`); render(); }) },
       field('Search the wiki (empty lists all)', h('input', { name: 'q', type: 'search' })), h('button', {}, 'Search')),
     state.results && h('div', {}, state.results.length
@@ -249,6 +252,7 @@ function campaignsPanel(w) {
       h('button', { class: 'link', onclick: () => openDirector(c.id) }, 'director'), ' · ',
       h('button', { class: 'link', onclick: () => openDowntime(c.id) }, 'downtime'), ' · ',
       h('button', { class: 'link', onclick: () => openNpcs(c.id) }, 'NPCs'), ' · ',
+      h('button', { class: 'link', onclick: () => openQuests(c.id) }, 'quests'), ' · ',
       h('button', { class: 'link', onclick: () => run(async () => { const r = await api('POST', `/api/campaigns/${c.id}/invites`, { role: 'player' }); prompt('Player invite code (single use):', r.code); }) }, 'invite player'), ' · ',
       h('button', { class: 'link', onclick: () => run(async () => { const r = await api('POST', `/api/campaigns/${c.id}/invites`, { role: 'spectator' }); prompt('Spectator invite code (single use):', r.code); }) }, 'invite spectator')))),
     h('form', { onsubmit: onSubmit(async (f) => { await api('POST', `/api/worlds/${w.id}/campaigns`, f.advancement ? f : { name: f.name }); await openWorld(w.id); }) },
@@ -355,7 +359,7 @@ async function openScene(id) {
 
 function renderScene() {
   const sc = state.scene, v = sc.view, gm = v.role === 'gm';
-  const modes = [['move', 'Move'], ['measure', 'Measure'], ...(gm ? [['reveal', 'Reveal fog'], ['hide', 'Hide fog'], ['place', 'Place token'], ['wall', 'Draw walls'], ['erase', 'Erase walls']] : [])];
+  const modes = [['move', 'Move'], ['measure', 'Measure'], ...(gm ? [['reveal', 'Reveal fog'], ['hide', 'Hide fog'], ['place', 'Place token'], ['wall', 'Draw walls'], ['erase', 'Erase walls'], ['trigger', 'Place trigger']] : [])];
   const views = [['2d', '2D board'], ['tactical', '3D tactical'], ['first', '3D first person']];
   $app.append(h('section', {},
     h('div', { class: 'crumbs' }, h('button', { class: 'link', onclick: () => run(() => go(state.loc.location.id)) }, `‹ ${state.loc.location.name}`), '›', h('strong', {}, v.scene.name), h('span', {}, `(${v.role})`)),
@@ -366,6 +370,7 @@ function renderScene() {
         drawBoard();
       } }, label)),
       h('span', { id: 'readout', class: 'muted', 'aria-live': 'polite' })),
+    h('p', { id: 'trigout', class: 'note', role: 'status', hidden: true }),
     h('div', { class: 'modes', role: 'toolbar', 'aria-label': 'View', style: 'display:flex;gap:6px;flex-wrap:wrap' },
       views.map(([m, label]) => h('button', { 'aria-pressed': String((sc.display || '2d') === m), onclick: (e) => {
         sc.display = m;
@@ -374,7 +379,7 @@ function renderScene() {
       } }, label)))));
   $app.append(h('div', { class: 'row' },
     h('section', {}, h('div', { id: 'board' })),
-    h('section', {}, h('div', { id: 'enc' }), diceBox(v), gm && sceneGmTools(v))));
+    h('section', {}, h('div', { id: 'enc' }), diceBox(v), gm && sceneGmTools(v), gm && triggerTools(v))));
   drawBoard(); drawEncounter();
 }
 
@@ -433,6 +438,13 @@ function drawBoard() {
         t.character && t.character.conditions.join(', ')].filter(Boolean).join(' · ')));
     svg.append(g);
   }
+  // Interaction triggers (Milestone 10): a gold diamond; in Move mode, click it to use it.
+  for (const t of sc.view.triggers || []) {
+    svg.append(S('g', { class: 'trig', 'data-id': t.id, transform: `translate(${t.x + 0.5} ${t.y + 0.5})`, style: 'cursor:pointer', tabindex: 0, role: 'button', 'aria-label': `Use ${t.name}`,
+      onkeydown: (e) => e.key === 'Enter' && useTrigger(t) },
+      S('rect', { x: -0.22, y: -0.22, width: 0.44, height: 0.44, transform: 'rotate(45)', fill: '#e0b02a', stroke: '#5a4200', 'stroke-width': 0.05, opacity: t.usedAt && t.once ? 0.4 : 1 }),
+      S('text', { y: 0.55, 'text-anchor': 'middle', style: 'font-size:0.28px' }, t.name), S('title', {}, t.name)));
+  }
   const overlay = S('g', { 'pointer-events': 'none' });
   const paintOverlay = () => overlay.replaceChildren(...[
     sc.measure && S('line', { x1: sc.measure.a.x, y1: sc.measure.a.y, x2: sc.measure.b.x, y2: sc.measure.b.y, stroke: '#c0392b', 'stroke-width': 0.08, 'stroke-dasharray': '0.2 0.1' }),
@@ -451,6 +463,9 @@ function drawBoard() {
   svg.addEventListener('pointerdown', (e) => {
     const p = boardPoint(svg, e);
     const tokEl = e.target.closest('.tok');
+    const trigEl = e.target.closest('.trig');
+    if (sc.mode === 'move' && trigEl && !tokEl) return useTrigger(sc.view.triggers.find((x) => x.id === trigEl.dataset.id));
+    if (sc.mode === 'trigger') return placeTrigger(scene, cellOf(p));
     if (sc.mode === 'move' && tokEl) {
       const t = tokens.find((x) => x.id === tokEl.dataset.id);
       if (!t || !t.mine) return;

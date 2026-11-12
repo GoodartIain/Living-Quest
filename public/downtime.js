@@ -12,7 +12,8 @@ async function renderDowntime() {
   const c = state.world.campaigns.find((x) => x.id === state.downtime);
   const box = h('div', {}, h('p', { class: 'muted' }, 'Loading…'));
   $app.append(h('section', {}, h('div', { class: 'crumbs' },
-    h('button', { class: 'link', onclick: () => { state.downtime = null; render(); } }, `‹ ${state.world.name}`), '›', h('strong', {}, `Downtime · ${c.name}`))), box);
+    h('button', { class: 'link', onclick: () => { state.downtime = null; render(); } }, `‹ ${state.world.name}`), '›', h('strong', {}, `Downtime · ${c.name}`))),
+    h('div', { id: 'run-host' }), box); // the side-quest panel stays open while the lists below redraw
   const reload = () => run(() => drawDowntime(box, c));
   box.reload = reload;
   reload();
@@ -20,6 +21,7 @@ async function renderDowntime() {
 
 async function drawDowntime(box, c) {
   const v = await api('GET', `/api/campaigns/${c.id}/downtime`);
+  if (v.gm) v.adventures = await api('GET', `/api/worlds/${state.world.id}/adventures`);
   const gm = v.gm;
   const act = (fn) => run(async () => { await fn(); await drawDowntime(box, c); });
   const w = v.windows.find((x) => x.status === 'open' || x.status === 'paused');
@@ -48,8 +50,9 @@ function createPanel(v, c, act) {
     h('form', { onsubmit: onSubmit((f, form) => act(() => {
         const keys = [...form.querySelectorAll('input[name=activity]:checked')].map((i) => i.value);
         const activities = keys.map((k) => v.templates.find((t) => t.key === k));
-        if (f.customName.trim()) activities.push({ key: 'custom-' + Date.now().toString(36), name: f.customName.trim(), days: +f.customDays, resolution: 'manual',
-          gpCost: +f.customCost || 0, rewardItem: f.customItem.trim(), repeatable: true });
+        const adv = f.adventureId && v.adventures.find((a) => a.id === f.adventureId);
+        if (f.customName.trim() || adv) activities.push({ key: 'custom-' + Date.now().toString(36), name: f.customName.trim() || adv.title, days: +f.customDays, resolution: 'manual',
+          gpCost: +f.customCost || 0, rewardItem: f.customItem.trim(), repeatable: true, ...(adv && { adventureId: adv.id }) });
         return api('POST', `/api/campaigns/${c.id}/downtime`, { duration: +f.duration, unit: f.unit, deadline: f.deadline || null, activities });
       })) },
       field('Length', h('input', { name: 'duration', type: 'number', min: 1, value: 3, size: 3 })),
@@ -62,7 +65,8 @@ function createPanel(v, c, act) {
         field('Name', h('input', { name: 'customName', placeholder: 'e.g. Rent the master forge' })),
         field('Days', h('input', { name: 'customDays', type: 'number', min: 1, value: 5, size: 3 })),
         field('Costs gp', h('input', { name: 'customCost', type: 'number', min: 0, value: 0, size: 4 })),
-        field('Reward item', h('input', { name: 'customItem' }))),
+        field('Reward item', h('input', { name: 'customItem' })),
+        field('Or a side-quest adventure', h('select', { name: 'adventureId' }, h('option', { value: '' }, '— none —'), v.adventures.map((a) => h('option', { value: a.id }, a.title))))),
       h('button', {}, 'Open downtime')));
 }
 
@@ -126,6 +130,11 @@ function actionRow(a, w, gm, act, actName, dayOf) {
     o && o.roll && h('div', {}, `Roll ${o.roll.formula} = ${o.roll.total} vs DC ${o.roll.dc}: ${o.success ? 'success' : 'failure'}`),
     o && a.status === 'approved' && h('div', {}, [o.notes, o.rewardGp && `+${o.rewardGp} gp`, o.rewardXp && `+${o.rewardXp} XP`, o.rewardItem].filter(Boolean).join(' · ')),
     a.gmNotes && h('div', { class: 'note' }, `GM: ${a.gmNotes}`),
+    a.runId && h('button', { class: 'play-run', onclick: () => run(async () => {
+      const host = document.getElementById('run-host');
+      await runPanel(host, a.runId, () => act(async () => {}));
+      host.scrollIntoView({ block: 'start' });
+    }) }, gm ? 'Review side quest' : 'Play side quest'),
     !gm && live && h('button', { class: 'link', onclick: () => act(() => api('DELETE', `/api/downtime-actions/${a.id}`)) }, 'withdraw'),
     gm && a.status !== 'cancelled' && h('form', { onsubmit: (e) => e.preventDefault() },
       h('label', { class: 'inline' }, h('input', { type: 'checkbox', name: 'success', checked: o ? o.success : true }), 'Success'),
@@ -144,5 +153,5 @@ function reportOf(w) {
   return h('details', { open: true }, h('summary', {}, `${r.from} to ${r.to} (${r.days} days)${r.cancelled ? ` · ${r.cancelled} cancelled` : ''}`),
     r.characters.map((ch) => h('div', { style: 'margin:6px 0' }, h('strong', {}, ch.name),
       ` · ${ch.gp >= 0 ? '+' : ''}${ch.gp} gp${r.xpApplied ? ` · +${ch.xp} XP` : ''}${ch.items.length ? ` · ${ch.items.join(', ')}` : ''}`,
-      h('ul', {}, ch.timeline.map((x) => h('li', {}, `${x.from}: ${x.activity} (${x.days} d) · ${x.status}${x.success === false ? ' · failed' : ''}${x.notes ? ` · ${x.notes}` : ''}`))))));
+      h('ul', {}, ch.timeline.map((x) => h('li', {}, `${x.from}: ${x.activity} (${x.days} d) · ${x.status}${x.success === false ? ' · failed' : ''}${x.notes ? ` · ${x.notes}` : ''}${x.effects && x.effects.length ? ` · ${x.effects.join(", ")}` : ''}`))))));
 }
