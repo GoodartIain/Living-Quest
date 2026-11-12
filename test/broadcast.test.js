@@ -41,6 +41,11 @@ test('no secret reaches a spectator or the livestream', async (t) => {
   await ok('POST', `/api/scenes/${market.id}/fog`, { x0: 0, y0: 0, x1: 4, y1: 3, reveal: true }, gm);
   await ok('PUT', `/api/scenes/${market.id}/encounter`, { combatants: [{ tokenId: goblin.id, initiative: 20 }, { tokenId: heraldTok.id, initiative: 5 }] }, gm);
   // Director, chat, rolls, journal.
+  // NPCs: a party-only and a GM-only one standing in the public town and on the on-air scene; a world event in the history.
+  await ok('POST', `/api/worlds/${world.id}/npcs`, { name: 'SECRET-partynpc', visibility: 'party', schedule: [{ from: '00:00', locationId: town.id, activity: 'SECRET-activity', sceneId: market.id, x: 1, y: 2 }] }, gm);
+  await ok('POST', `/api/worlds/${world.id}/npcs`, { name: 'SECRET-spy', visibility: 'gm', schedule: [{ from: '00:00', locationId: town.id, activity: 'Watching', sceneId: market.id, x: 2, y: 2 }] }, gm);
+  await ok('POST', `/api/worlds/${world.id}/npcs`, { name: 'Baker', visibility: 'public', schedule: [{ from: '00:00', locationId: town.id, activity: 'Baking' }] }, gm);
+  await ok('POST', `/api/campaigns/${camp.id}/events`, { kind: 'SECRET-event' }, gm);
   await ok('PATCH', `/api/campaigns/${camp.id}/director`, { notes: 'SECRET-notes', beats: [{ text: 'SECRET-beat' }], liveSceneId: market.id }, gm);
   await ok('POST', `/api/campaigns/${camp.id}/chat`, { channel: 'whisper', toUserIds: [ids.Ana], text: 'SECRET-whisper' }, pat);
   await ok('POST', `/api/campaigns/${camp.id}/chat`, { channel: 'table', text: 'SECRET-table' }, pat);
@@ -80,6 +85,7 @@ test('no secret reaches a spectator or the livestream', async (t) => {
   await crawl(world.rootLocationId);
   for (const p of (await get(`/api/worlds/${world.id}/pages`)).body) await get(`/api/pages/${p.id}`);
   for (const q of ['SECRET', 'notes', 'goblin']) await get(`/api/worlds/${world.id}/pages?q=${q}`);
+  await get(`/api/worlds/${world.id}/npcs`); await get(`/api/campaigns/${camp.id}/npc-log`);
   for (const s of (await get(`/api/worlds/${world.id}/scenes`)).body) await get(`/api/scenes/${s.id}`);
   await get(`/api/campaigns/${camp.id}/chat`);
   for (const c of (await get(`/api/campaigns/${camp.id}/characters`)).body) await get(`/api/characters/${c.id}`);
@@ -95,7 +101,7 @@ test('no secret reaches a spectator or the livestream', async (t) => {
   const everything = JSON.stringify([seen, sceneLive.msgs, chatLive.msgs, tv.msgs]);
   const leaks = [...new Set(everything.match(/SECRET-[a-z]+/g) || [])];
   assert.deepEqual(leaks, [], `leaked to the spectator or stream: ${leaks.join(', ')}`);
-  assert.ok(everything.includes('Hello stream!') && everything.includes('Town Herald') && everything.includes('Herald'), 'the authorised content is there');
+  assert.ok(everything.includes('Hello stream!') && everything.includes('Town Herald') && everything.includes('Herald') && everything.includes('Baker'), 'the authorised content is there');
 
   // Stopping is immediate; rotating the link retires the old one.
   await ok('PATCH', `/api/campaigns/${camp.id}/broadcast`, { enabled: false }, gm);

@@ -1,4 +1,4 @@
-// Milestone 8: campaign clock and downtime. Game time is a whole-day counter per campaign; only the GM moves it,
+// Milestone 8: campaign clock and downtime. Game time is a day counter plus minute of the day per campaign; only the GM moves it,
 // directly or by publishing a downtime window. Players book activities on specific days; the server refuses overlaps,
 // keeps rival claims on a unique resource as "conflicted" for the GM, and applies approved results in one publish.
 'use strict';
@@ -17,7 +17,7 @@ const TEMPLATES = [
 const LIVE = ['proposed', 'resolved', 'conflicted', 'approved']; // statuses that occupy days and claims
 const UNRESOLVED = ['proposed', 'resolved', 'conflicted'];
 
-module.exports = function downtime({ db, find, fail, need, record, id, check, rules, chars }) {
+module.exports = function downtime({ db, find, fail, need, record, id, check, rules, chars, onClock = () => {} }) {
   const { str, oneOf, num, bool } = check;
   const calendarOf = (c) => find('worlds', c.worldId).settings.calendar;
   function label(cal, day) {
@@ -26,7 +26,15 @@ module.exports = function downtime({ db, find, fail, need, record, id, check, ru
     const month = (cal.monthNames && cal.monthNames[m]) || `Month ${m + 1}`;
     return `${(day % cal.daysPerMonth) + 1} ${month}, Year ${Math.floor(day / perYear) + 1}`;
   }
-  const clockOf = (c) => (c.clock || { day: 0 }).day;
+  const clockOf = (c) => c.clock.day;
+  const hhmm = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+  const clockView = (c) => ({ day: c.clock.day, minute: c.clock.minute, time: hhmm(c.clock.minute), label: label(calendarOf(c), c.clock.day) });
+  // Every clock move goes through here, so NPC routines (npcs.js) see the time that passed.
+  function moveClock(c, day, minute) {
+    const from = c.clock.day * 1440 + c.clock.minute;
+    c.clock = { day, minute };
+    onClock(c, from);
+  }
   const isGm = (u, c) => find('worlds', c.worldId).ownerId === u.id;
   const ownsCharacter = (u, ch) => ch.ownerId === u.id;
   const windowOpen = (camp) => db.downtimes.find((w) => w.campaignId === camp.id && (w.status === 'open' || w.status === 'paused'));
@@ -57,7 +65,7 @@ module.exports = function downtime({ db, find, fail, need, record, id, check, ru
     const cal = calendarOf(c);
     const mine = new Set(db.characters.filter((ch) => ch.campaignId === c.id && ownsCharacter(u, ch)).map((ch) => ch.id));
     return {
-      calendar: cal, clock: { day: clockOf(c), label: label(cal, clockOf(c)) }, templates: gm ? TEMPLATES : undefined, gm,
+      calendar: cal, clock: clockView(c), templates: gm ? TEMPLATES : undefined, gm,
       bookable: db.characters.filter((ch) => ch.campaignId === c.id && (gm || mine.has(ch.id))).map((ch) => ({ id: ch.id, name: ch.name, gp: ch.currency.gp })),
       windows: db.downtimes.filter((w) => w.campaignId === c.id).map((w) => {
         // Players see only their own characters' activities and report lines; side quests stay private.
@@ -90,14 +98,22 @@ module.exports = function downtime({ db, find, fail, need, record, id, check, ru
       return cal;
     },
 
-    // Manual time jump (GM). Refused while downtime is running, so the window's calendar stays consistent.
+    // Manual time jump (GM): { advanceDays } or { advanceMinutes } or { until: 'HH:MM' } (the next time it is that time).
+    // Refused while downtime is running, so the window's calendar stays consistent. Time never goes backwards.
     'POST /api/campaigns/:id/clock': (u, b, p) => {
       const c = find('campaigns', p.id);
       need(u, c.worldId, 'gm');
       if (windowOpen(c)) fail(409, 'publish or cancel the open downtime first');
-      c.clock = { day: clockOf(c) + num(b.advanceDays, 'advanceDays', 1, 100000, true) };
-      record(u.id, 'clock.advanced', { campaignId: c.id, day: c.clock.day });
-      return { day: c.clock.day, label: label(calendarOf(c), c.clock.day) };
+      let to = c.clock.day * 1440 + c.clock.minute;
+      if (b.advanceDays !== undefined) to += 1440 * num(b.advanceDays, 'advanceDays', 1, 100000, true);
+      else if (b.advanceMinutes !== undefined) to += num(b.advanceMinutes, 'advanceMinutes', 1, 1440 * 100, true);
+      else if (typeof b.until === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(b.until)) {
+        const m = Number(b.until.slice(0, 2)) * 60 + Number(b.until.slice(3));
+        to += ((m - c.clock.minute + 1439) % 1440) + 1;
+      } else fail(400, 'give advanceDays, advanceMinutes or until (HH:MM)');
+      moveClock(c, Math.floor(to / 1440), to % 1440);
+      record(u.id, 'clock.advanced', { campaignId: c.id, day: c.clock.day, minute: c.clock.minute });
+      return clockView(c);
     },
 
     // { duration, unit: days|weeks|months, deadline?, activities: [key | template] }
@@ -262,7 +278,7 @@ module.exports = function downtime({ db, find, fail, need, record, id, check, ru
       };
       w.status = 'published';
       w.publishedAt = new Date().toISOString();
-      c.clock = { day: w.endDay }; // in-game time moves only now, when the GM publishes
+      moveClock(c, w.endDay, c.clock.minute); // in-game time moves only now, when the GM publishes
       record(u.id, 'downtime.published', { downtimeId: w.id, day: w.endDay, approved: approved.length, cancelled: open.length });
       return w;
     },

@@ -35,6 +35,8 @@
   .note { background:var(--note); border-radius:6px; padding:8px; margin:8px 0; }
   .dt-strip { display:flex; gap:1px; margin:4px 0; } .dt-strip span { flex:1; min-width:3px; height:14px; background:#8883; border-radius:2px; }
   .dt-strip .on { background:#5a8f5a; } .dt-strip .proposed, .dt-strip .resolved { background:#c9a227; } .dt-strip .conflicted { background:#c0504d; }
+  .npc-editor input[type=number] { width:4.5em; } .npc-editor h4 { width:100%; margin:12px 0 4px; } .npc-editor .muted { width:100%; }
+  tr.npc-row td, tr th { padding:4px 10px 4px 0; vertical-align:top; }
   .prose p { white-space:pre-wrap; margin:6px 0; }
   ul { padding-left:18px; margin:4px 0; }
   details { margin-top:8px; } summary { cursor:pointer; color:var(--accent); }
@@ -73,6 +75,7 @@
 <script src="chat.js"></script>
 <script src="director.js"></script>
 <script src="downtime.js"></script>
+<script src="npcs.js"></script>
 <script src="vendor/livekit-client.umd.js"></script>
 <script src="voice.js"></script>
 <script>
@@ -147,7 +150,7 @@ async function render() {
 async function openWorld(id) {
   state.world = await api('GET', `/api/worlds/${id}`);
   state.pages = await api('GET', `/api/worlds/${id}/pages`);
-  state.results = null; state.wizard = null; state.character = null; state.director = null; state.downtime = null;
+  state.results = null; state.wizard = null; state.character = null; state.director = null; state.downtime = null; state.npcs = false;
   await Promise.all([loadCharacters(), loadRules()]);
   startChat(state.world.campaigns[0] && state.world.campaigns[0].id);
   await go(state.world.rootLocationId);
@@ -176,6 +179,7 @@ function renderWorld() {
   if (state.scene) return renderScene();
   if (state.director) return renderDirector();
   if (state.downtime) return renderDowntime();
+  if (state.npcs) return renderNpcs();
   if (state.wizard) return renderWizard();
   if (state.character) return renderSheet();
   const banner = liveBanner();
@@ -218,6 +222,8 @@ function renderWorld() {
       svg,
       v.children.length ? h('ul', {}, v.children.map((c) => h('li', {}, h('button', { class: 'link', onclick: () => run(() => go(c.id)) }, c.name), ` — ${c.type}`,
         gm ? ` [${c.visibility}${c.requiresDiscovery ? ', needs discovery' : ''}]` : ''))) : h('p', { class: 'muted' }, 'No known places here.'),
+      v.npcsHere.length > 0 && h('p', { class: 'npcs-here' }, h('strong', {}, 'Here now: '), v.npcsHere.map((n, i) => [i ? ', ' : '',
+        n.pageId ? h('button', { class: 'link', onclick: () => run(() => openPage(n.pageId)) }, n.name) : n.name, ` (${n.activity.toLowerCase()})`])),
       h('h3', {}, 'Scenes'),
       v.scenes.length ? h('ul', {}, v.scenes.map((s) => h('li', {}, h('button', { class: 'link', onclick: () => run(() => openScene(s.id)) }, s.name), gm ? ` [${s.visibility}]` : '')))
         : h('p', { class: 'muted' }, 'No scenes here.'),
@@ -242,6 +248,7 @@ function campaignsPanel(w) {
       }) }, 'switch mode'), ' · ',
       h('button', { class: 'link', onclick: () => openDirector(c.id) }, 'director'), ' · ',
       h('button', { class: 'link', onclick: () => openDowntime(c.id) }, 'downtime'), ' · ',
+      h('button', { class: 'link', onclick: () => openNpcs(c.id) }, 'NPCs'), ' · ',
       h('button', { class: 'link', onclick: () => run(async () => { const r = await api('POST', `/api/campaigns/${c.id}/invites`, { role: 'player' }); prompt('Player invite code (single use):', r.code); }) }, 'invite player'), ' · ',
       h('button', { class: 'link', onclick: () => run(async () => { const r = await api('POST', `/api/campaigns/${c.id}/invites`, { role: 'spectator' }); prompt('Spectator invite code (single use):', r.code); }) }, 'invite spectator')))),
     h('form', { onsubmit: onSubmit(async (f) => { await api('POST', `/api/worlds/${w.id}/campaigns`, f.advancement ? f : { name: f.name }); await openWorld(w.id); }) },

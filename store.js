@@ -20,7 +20,7 @@ const SPEC = {
   discoveries: ['id', 'worldId', 'locationId', 'campaignId'],
   revisions: ['id', 'pageId', 'worldId', 'at', 'actor', 'title', 'body', 'gmNotes', 'kind', 'visibility'],
   scenes: ['id', 'worldId', 'locationId', 'name', 'grid', 'cols', 'rows', 'backgroundUrl', 'visibility', 'fog', 'encounter', 'walls'],
-  tokens: ['id', 'worldId', 'sceneId', 'name', 'x', 'y', 'size', 'color', 'visibility', 'controlledBy', 'pageId', 'characterId'],
+  tokens: ['id', 'worldId', 'sceneId', 'name', 'x', 'y', 'size', 'color', 'visibility', 'controlledBy', 'pageId', 'characterId', 'npcId'],
   characters: ['id', 'worldId', 'campaignId', 'ownerId', 'ruleset', 'name', 'portraitUrl', 'personality', 'backstory', 'species', 'className',
     'background', 'abilityMethod', 'baseScores', 'backgroundBonus', 'abilities', 'skills', 'feats', 'tools', 'hp', 'conditions', 'inventory', 'currency',
     'weapons', 'spells', 'slotsUsed', 'size', 'armor', 'shield', 'masteries', 'raging', 'deathSaves', 'hitDiceUsed', 'journal', 'choices', 'subclass', 'multiclass'],
@@ -30,13 +30,16 @@ const SPEC = {
   advancements: ['id', 'worldId', 'campaignId', 'characterId', 'kind', 'amount', 'category', 'reason', 'by', 'auto', 'at'],
   downtimes: ['id', 'worldId', 'campaignId', 'startDay', 'endDay', 'deadline', 'activities', 'status', 'report', 'createdBy', 'publishedAt'],
   downtimeActions: ['id', 'worldId', 'downtimeId', 'campaignId', 'characterId', 'userId', 'activity', 'startDay', 'days', 'details', 'claim', 'status', 'outcome', 'gmNotes', 'decidedBy'],
+  npcs: ['id', 'worldId', 'pageId', 'name', 'occupation', 'homeLocationId', 'visibility', 'autonomy', 'importance', 'color', 'schedule', 'reactions'],
+  npcEvents: ['id', 'worldId', 'campaignId', 'npcId', 'kind', 'cause', 'fromTime', 'toTime', 'activity', 'locationId', 'sceneId', 'x', 'y', 'after', 'relocate'],
+  npcLog: ['id', 'worldId', 'campaignId', 'npcId', 'time', 'kind', 'text', 'locationId'],
   rolls: ['id', 'worldId', 'sceneId', 'userId', 'userName', 'characterId', 'label', 'visibility', 'formula', 'mode', 'total', 'parts', 'at'],
   events: ['seq', 'at', 'actor', 'type', 'data'],
 };
 const COLLECTIONS = Object.keys(SPEC);
-const JSON_FIELDS = new Set(['settings', 'advancement', 'voice', 'director', 'walls', 'broadcast', 'clock', 'activities', 'report', 'outcome', 'fog', 'encounter', 'controlledBy', 'data', 'baseScores', 'backgroundBonus',
+const JSON_FIELDS = new Set(['settings', 'advancement', 'voice', 'director', 'walls', 'broadcast', 'clock', 'activities', 'schedule', 'reactions', 'relocate', 'report', 'outcome', 'fog', 'encounter', 'controlledBy', 'data', 'baseScores', 'backgroundBonus',
   'abilities', 'skills', 'feats', 'tools', 'hp', 'conditions', 'inventory', 'currency', 'parts', 'weapons', 'spells', 'slotsUsed', 'masteries', 'deathSaves', 'journal', 'choices', 'multiclass', 'toUserIds', 'toNames']);
-const APPEND_ONLY = new Set(['events', 'revisions', 'advancements', 'rolls', 'messages', 'chatDeletions']);
+const APPEND_ONLY = new Set(['npcEvents', 'npcLog', 'events', 'revisions', 'advancements', 'rolls', 'messages', 'chatDeletions']);
 const keyOf = (c) => (c === 'events' ? 'seq' : 'id');
 const snake = (f) => f.replace(/[A-Z]/g, (m) => '_' + m.toLowerCase());
 const empty = () => Object.fromEntries(COLLECTIONS.map((c) => [c, []]));
@@ -46,10 +49,10 @@ function upgrade(db) {
   for (const l of db.locations) l.requiresDiscovery ??= false;
   for (const p of db.pages) { p.kind ??= p.locationId ? 'location' : 'lore'; p.visibility ??= 'party'; p.locationId ??= null; }
   for (const i of db.invites) i.acceptedBy ??= null;
-  for (const t of db.tokens) t.characterId ??= null;
+  for (const t of db.tokens) { t.characterId ??= null; t.npcId ??= null; }
   for (const s of db.scenes) s.walls ??= [];
   for (const c of db.campaigns) { c.advancement.levelUp ??= 'confirm'; c.advancement.alignLevels ??= false; c.voice ??= { spectators: 'none', muted: [] }; c.director ??= { liveSceneId: null, notes: '', beats: [] };
-    c.broadcast ??= { enabled: false, keyHash: null, sceneId: null, title: '', showInitiative: true, showRolls: true }; c.clock ??= { day: 0 }; }
+    c.broadcast ??= { enabled: false, keyHash: null, sceneId: null, title: '', showInitiative: true, showRolls: true }; c.clock ??= { day: 0 }; c.clock.minute ??= 480; }
   for (const c of db.characters) {
     c.weapons ??= []; c.spells ??= []; c.slotsUsed ??= {}; c.armor ??= null; c.shield ??= false; c.masteries ??= []; c.raging ??= false;
     c.deathSaves ??= { successes: 0, failures: 0 }; c.hitDiceUsed ??= 0; c.journal ??= []; c.choices ??= []; c.subclass ??= null; c.multiclass ??= {};

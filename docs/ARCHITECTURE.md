@@ -175,6 +175,7 @@ interface Zone { id; polygon: Vec3[]; trigger: Interaction[] }
 - Significance gate: routine → apply; minor → apply + audit; major → `proposal`; protected → rejected. Thresholds per world, overridable down to NPC.
 - Knowledge: memories carry provenance and scope; dialogue/AI context is assembled only from the NPC's memories plus public canon, via the same projection layer.
 - Preview: run `advance` against a forked snapshot, show diff, commit or discard.
+- As built (Milestone 9, `npcs.js`): layers 1–2 only. Campaign time is `{ day, minute }`. An NPC's state at time T is a pure function of its schedule, the campaign's reaction/override records (`npc_events`, append-only) and T, so no NPC is simulated between clock moves; each clock move logs the transitions it skipped over (`npc_log`; jumps over 3 days log one summary per NPC) and syncs NPC tokens for scenes. 'Relocate' reactions rewrite routine steps from the moment they end. Players see an NPC only through the usual visibility rules (NPC visibility, location visibility, fog on scenes).
 
 ## 9. Spectator security
 

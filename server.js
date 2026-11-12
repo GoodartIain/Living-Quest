@@ -11,6 +11,7 @@ const chat = require('./chat.js');
 const voice = require('./voice.js');
 const broadcast = require('./broadcast.js');
 const downtime = require('./downtime.js');
+const npcModule = require('./npcs.js');
 const rules = require('./rulesets/srd-5.2.1.js');
 
 const ADVANCEMENT = ['milestone', 'xp'];
@@ -156,6 +157,7 @@ function createApp({ store = memoryStore(), env = process.env } = {}) {
       ...v.viewPage(find('pages', loc.pageId)),
       children: db.locations.filter((c) => c.parentId === loc.id && v.seesLoc(c)),
       scenes: table2d.scenesAt(v.role, loc.id),
+      npcsHere: people.hereFor(user, loc),
     };
   }
 
@@ -263,7 +265,7 @@ function createApp({ store = memoryStore(), env = process.env } = {}) {
         voice: { spectators: 'none', muted: [] },
         director: { liveSceneId: null, notes: '', beats: [] },
         broadcast: { enabled: false, keyHash: null, sceneId: null, title: '', showInitiative: true, showRolls: true },
-        clock: { day: 0 },
+        clock: { day: 0, minute: 480 },
       };
       db.campaigns.push(campaign);
       record(u.id, 'campaign.created', { campaignId: campaign.id, advancement: campaign.advancement });
@@ -399,8 +401,9 @@ function createApp({ store = memoryStore(), env = process.env } = {}) {
   hooks.onScene = cast.onScene;
   Object.assign(routes, cast.routes);
   const calls = voice({ db, find, fail, need, record, check, env });
-  const later = downtime({ db, find, fail, need, record, id, check, rules, chars });
-  Object.assign(routes, table2d.routes, chars.routes, talk.routes, calls.routes, later.routes);
+  const people = npcModule({ db, find, fail, need, record, id, check, viewer, SEES, VISIBILITY, publishScene: table2d.publish });
+  const later = downtime({ db, find, fail, need, record, id, check, rules, chars, onClock: people.onClock });
+  Object.assign(routes, table2d.routes, chars.routes, talk.routes, calls.routes, later.routes, people.routes);
 
   // GM edits for locations and maps: field whitelist. Ids never change, so renames never break links.
   const EDITABLE = {
@@ -459,7 +462,7 @@ function createApp({ store = memoryStore(), env = process.env } = {}) {
       const chatLive = req.method === 'GET' && url.pathname.match(/^\/api\/campaigns\/([\w-]+)\/chat\/stream$/);
       if (chatLive) return talk.stream(req, res, authenticate(req, url.searchParams.get('token')), chatLive[1]);
       const route = table.find((r) => r.method === req.method && r.re.test(url.pathname)) || fail(404, 'no such route');
-      const params = { id: url.pathname.match(route.re)[1], q: url.searchParams.get('q') };
+      const params = { id: url.pathname.match(route.re)[1], q: url.searchParams.get('q'), query: Object.fromEntries(url.searchParams) };
       const body = req.method === 'GET' ? {} : await readJson(req);
       const anonymous = req.method === 'POST' && url.pathname === '/api/users';
       if (store.reloading) fail(503, 'recovering from a storage error, retry in a moment');

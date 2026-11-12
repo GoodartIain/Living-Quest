@@ -26,7 +26,7 @@ async function drawDowntime(box, c) {
   const past = v.windows.filter((x) => x.status === 'published').reverse();
   const dayOf = (day) => (w ? day - w.startDay + 1 : day);
   box.replaceChildren(h('div', {},
-    h('section', {}, h('h2', {}, `Today: ${v.clock.label}`),
+    h('section', {}, h('h2', {}, `Today: ${v.clock.label}, ${v.clock.time}`),
       h('p', { class: 'muted' }, `Calendar: ${v.calendar.daysPerWeek}-day weeks, ${v.calendar.daysPerMonth}-day months, ${v.calendar.monthsPerYear} months a year. In-game time only moves when the GM advances it or publishes downtime.`),
       gm && !w && h('form', { onsubmit: onSubmit((f) => act(() => api('POST', `/api/campaigns/${c.id}/clock`, { advanceDays: +f.days }))) },
         field('Advance the clock by days', h('input', { name: 'days', type: 'number', min: 1, value: 1, size: 4 })), h('button', {}, 'Advance')),

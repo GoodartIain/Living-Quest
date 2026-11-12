@@ -161,7 +161,7 @@ module.exports = function tabletop({ db, find, fail, need, viewer, record, id, S
       const t = { id: id(), worldId: s.worldId, sceneId: s.id, name: str(b.name, 'name', 60), x, y, size,
         color: /^#[0-9a-f]{6}$/i.test(b.color ?? '') ? b.color : '#7a4b1f',
         visibility: oneOf(b.visibility ?? 'party', VISIBILITY, 'visibility'),
-        controlledBy: controllers(s.worldId, b.controlledBy ?? []), pageId: b.pageId ?? null, characterId: ch ? ch.id : null };
+        controlledBy: controllers(s.worldId, b.controlledBy ?? []), pageId: b.pageId ?? null, characterId: ch ? ch.id : null, npcId: null };
       db.tokens.push(t);
       changed(s, u.id, 'token.created', { tokenId: t.id, sceneId: s.id });
       return t;

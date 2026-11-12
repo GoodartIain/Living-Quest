@@ -45,6 +45,12 @@ test('everything survives a restart exactly', { skip }, async () => {
   await a.ok('POST', `/api/campaigns/${c.id}/chat`, { channel: 'whisper', toUserIds: [me], text: 'psst' }, gm);
   const gone = await a.ok('POST', `/api/campaigns/${c.id}/chat`, { channel: 'table', text: 'oops' }, pl);
   await a.ok('DELETE', `/api/messages/${gone.id}`, null, gm);
+  const mara = await a.ok('POST', `/api/worlds/${w.id}/npcs`, { pageId: npc.id, homeLocationId: town.id, schedule: [{ from: '09:00', locationId: town.id, activity: 'Selling', sceneId: scene.id, x: 4, y: 4 }],
+    reactions: [{ on: 'fire', activity: 'Fleeing', locationId: 'home', minutes: 30, then: 'relocate', relocate: { from: town.id, to: town.id } }], autonomy: 'reactive' }, gm);
+  await a.ok('POST', `/api/campaigns/${c.id}/clock`, { until: '10:00' }, gm);
+  await a.ok('POST', `/api/campaigns/${c.id}/events`, { kind: 'fire' }, gm);
+  const dt = await a.ok('POST', `/api/campaigns/${c.id}/downtime`, { duration: 1, activities: ['work'] }, gm);
+  await a.ok('POST', `/api/downtime/${dt.id}/actions`, { characterId: ch.id, activity: 'work', startDay: dt.startDay }, gm).catch(() => {});
   const before = JSON.stringify(a.app.db);
   await a.close();
 
@@ -56,6 +62,9 @@ test('everything survives a restart exactly', { skip }, async () => {
     const sheet = await b.ok('GET', `/api/characters/${ch.id}`, null, pl);
     assert.deepEqual([sheet.level, sheet.xp, sheet.history.length], [2, 450, 2]);
     assert.deepEqual((await b.ok('GET', `/api/campaigns/${c.id}/chat`, null, pl)).messages.map((m) => m.text), ['psst']);
+    assert.equal((await b.ok('GET', `/api/worlds/${w.id}/npcs`, null, gm)).npcs[0].now.activity, 'Fleeing', 'reaction state survives');
+    assert.ok((await b.ok('GET', `/api/campaigns/${c.id}/npc-log`, null, gm)).length >= 2);
+    assert.equal(mara.name, 'Mara');
   } finally { await b.close(); }
 });
 
