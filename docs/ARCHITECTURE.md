@@ -179,6 +179,14 @@ interface Zone { id; polygon: Vec3[]; trigger: Interaction[] }
 
 - As built (Milestone 11, `world.js`): factions keep starting values; `world_changes` (append-only) holds every later change with provenance, so a campaign's state is a replay. Faction activities are bounded rules evaluated per day with a seeded chance (`sha256(campaign, faction, activity, day)`), so a preview is deterministic. Commit recomputes and compares a fingerprint of the draft (developments, decisions, change count, faction and happening definitions) before applying anything, then steps the clock to each development so NPC routines and reactions stay consistent.
 
+## 8b. Accounts and sessions (as built, Milestone 13)
+
+`accounts.js`: email + scrypt password accounts; random session tokens stored as SHA-256 hashes in `sessions` (30-day
+expiry, revocable); live streams authenticate with 10-minute in-memory stream tickets so session tokens never appear in
+URLs; per-address rate limits; data export and account deletion. Name-only development sign-in exists only outside
+production. Pages are served with a Content-Security-Policy that allows this server's scripts and each page's inline
+scripts by hash. See docs/SECURITY.md.
+
 ## 9. Spectator security
 
 - Spectator is a server role (implemented: sees only `public` locations, no gm notes, no write routes).

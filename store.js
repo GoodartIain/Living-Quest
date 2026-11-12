@@ -8,7 +8,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const SPEC = {
-  users: ['id', 'name', 'tokenHash'],
+  users: ['id', 'name', 'tokenHash', 'email', 'passwordHash'],
+  sessions: ['id', 'userId', 'tokenHash', 'expiresAt'],
   worlds: ['id', 'ownerId', 'name', 'settings', 'rootLocationId'],
   campaigns: ['id', 'worldId', 'name', 'advancement', 'voice', 'director', 'broadcast', 'clock'],
   memberships: ['id', 'userId', 'worldId', 'campaignId', 'role'],
@@ -56,6 +57,7 @@ function upgrade(db) {
   for (const l of db.locations) l.requiresDiscovery ??= false;
   for (const p of db.pages) { p.kind ??= p.locationId ? 'location' : 'lore'; p.visibility ??= 'party'; p.locationId ??= null; }
   for (const i of db.invites) i.acceptedBy ??= null;
+  for (const u of db.users) { u.email ??= null; u.passwordHash ??= null; }
   for (const t of db.tokens) { t.characterId ??= null; t.npcId ??= null; }
   for (const s of db.scenes) s.walls ??= [];
   for (const c of db.campaigns) { c.advancement.levelUp ??= 'confirm'; c.advancement.alignLevels ??= false; c.voice ??= { spectators: 'none', muted: [] }; c.director ??= { liveSceneId: null, notes: '', beats: [] };
@@ -98,7 +100,7 @@ async function load(pool) {
 
 // In-memory only (tests, demos): same interface, nothing is written.
 function memoryStore() {
-  return { db: empty(), generation: 0, reloading: false, persist: async () => {}, close: async () => {}, onReload: () => {} };
+  return { db: empty(), generation: 0, reloading: false, persist: async () => {}, close: async () => {}, onReload: () => {}, ping: async () => {} };
 }
 
 async function postgresStore({ databaseUrl, importFile }) {
@@ -168,7 +170,8 @@ async function postgresStore({ databaseUrl, importFile }) {
       return p;
     },
     onReload: (fn) => { reloadHandler = fn; },
-    close: () => pool.end(),
+    close: async () => { await chain; await pool.end(); }, // finish the write in progress first
+    ping: () => pool.query('SELECT 1'),
   };
 
   // One-time import of a pre-Postgres data.json into an empty database.
@@ -181,4 +184,33 @@ async function postgresStore({ databaseUrl, importFile }) {
   return store;
 }
 
-module.exports = { memoryStore, postgresStore, COLLECTIONS };
+// Backups: every table read inside one read-only, repeatable-read transaction, so the copy is consistent even while
+// the app keeps writing. Returns the data plus the migrations it was written with.
+async function snapshot(databaseUrl) {
+  const { Client } = require('pg');
+  const client = new Client({ connectionString: databaseUrl });
+  await client.connect();
+  try {
+    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    const migrations = (await client.query('SELECT name FROM schema_migrations ORDER BY name')).rows.map((r) => r.name);
+    const data = await load(client);
+    await client.query('COMMIT');
+    return { migrations, data };
+  } finally { await client.end(); }
+}
+// Restore into an empty database (migrations are applied first). Refuses a non-empty database or a newer backup.
+async function restoreInto(databaseUrl, backup) {
+  const known = fs.readdirSync(path.join(__dirname, 'migrations')).filter((f) => f.endsWith('.sql')).sort();
+  const unknown = backup.migrations.filter((m) => !known.includes(m));
+  if (unknown.length) throw new Error(`this backup comes from a newer version (${unknown.join(', ')}); upgrade the app first`);
+  const store = await postgresStore({ databaseUrl });
+  try {
+    if (COLLECTIONS.some((c) => store.db[c].length)) throw new Error('the target database is not empty; restore into a new, empty database');
+    const data = upgrade({ ...empty(), ...backup.data });
+    for (const c of COLLECTIONS) store.db[c].push(...data[c]);
+    await store.persist();
+    return Object.fromEntries(COLLECTIONS.map((c) => [c, store.db[c].length]));
+  } finally { await store.close(); }
+}
+
+module.exports = { memoryStore, postgresStore, COLLECTIONS, snapshot, restoreInto };

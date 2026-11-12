@@ -1,9 +1,10 @@
 # Living Quest
 
-Browser tabletop / worldbuilding platform. This repository holds Milestones 1–12: worlds, campaigns, advancement settings, invites, nested maps, a linked wiki (NPCs, factions, lore) with relationships, backlinks, search, history and per-campaign discovery, a live 2D tabletop (tokens, fog of war, measuring, encounters), characters (guided creation, sheets, server-side dice, XP or milestone levelling linked to tokens), campaign chat with whispers, voice/video calls through a self-hosted LiveKit server, a GM Director view, a 3D view of scenes (tactical and first person), a livestream page for OBS, a campaign clock with downtime (players book activities, the GM approves and publishes), NPCs with daily routines that react to world events, a quest log, branching side quests played during downtime with GM approval of consequential outcomes, interaction triggers on scenes, factions with a previewed, GM-approved world simulation, and a livestream presentation with a scene playlist, GM-directed cameras, overlays and audience polls, all with server-enforced visibility.
+Browser tabletop / worldbuilding platform. This repository holds all 13 milestones: worlds, campaigns, advancement settings, invites, nested maps, a linked wiki (NPCs, factions, lore) with relationships, backlinks, search, history and per-campaign discovery, a live 2D tabletop (tokens, fog of war, measuring, encounters), characters (guided creation, sheets, server-side dice, XP or milestone levelling linked to tokens), campaign chat with whispers, voice/video calls through a self-hosted LiveKit server, a GM Director view, a 3D view of scenes (tactical and first person), a livestream page for OBS, a campaign clock with downtime (players book activities, the GM approves and publishes), NPCs with daily routines that react to world events, a quest log, branching side quests played during downtime with GM approval of consequential outcomes, interaction triggers on scenes, factions with a previewed, GM-approved world simulation, and a livestream presentation with a scene playlist, GM-directed cameras, overlays and audience polls, all with server-enforced visibility, plus the production pieces: accounts, security hardening, backups, load and accessibility testing, and Docker deployment with HTTPS.
 
 ```sh
-docker compose up                      # app + PostgreSQL 16, http://localhost:3000
+cp .env.example .env && docker compose -f docker-compose.yml -f docker-compose.local.yml up   # try it: http://localhost:3000
+cp .env.example .env && docker compose up -d                                                  # a real server with HTTPS: see docs/OPERATIONS.md
 ```
 
 Or run it yourself (Node 22+, PostgreSQL 14+):
@@ -18,7 +19,9 @@ TEST_DATABASE_URL=postgres://user:pass@localhost/lq_test npm test  # also the Po
 
 Upgrading from a version that saved to `data.json`: start with `DATABASE_URL` pointing at an empty database and the file is imported once (`DATA_FILE` sets its path).
 
-Dependencies: `pg`, `livekit-client` (browser SDK for calls) and `three` (3D view). Voice/video needs a LiveKit server: see [docs/DEPLOY.md](docs/DEPLOY.md). Design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Status: [docs/MILESTONES.md](docs/MILESTONES.md).
+Dependencies: `pg`, `livekit-client` (browser SDK for calls) and `three` (3D view); `axe-core` for the accessibility audit (development only). Voice/video needs a LiveKit server: see [docs/DEPLOY.md](docs/DEPLOY.md). Running a server: [docs/OPERATIONS.md](docs/OPERATIONS.md). Before a beta: [docs/BETA.md](docs/BETA.md). Security and privacy: [docs/SECURITY.md](docs/SECURITY.md). Performance: [docs/PERFORMANCE.md](docs/PERFORMANCE.md). Accessibility: [docs/ACCESSIBILITY.md](docs/ACCESSIBILITY.md). Design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Status: [docs/MILESTONES.md](docs/MILESTONES.md).
+
+In production (`NODE_ENV=production`) people sign up with an email and password; outside production a quick name-only sign-in is also offered (`DEV_SIGNIN=1` turns it on in production, for demos only).
 
 ## Licence notice for game rules
 

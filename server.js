@@ -15,6 +15,7 @@ const npcModule = require('./npcs.js');
 const questModule = require('./quests.js');
 const triggerModule = require('./triggers.js');
 const worldModule = require('./world.js');
+const accountModule = require('./accounts.js');
 const rules = require('./rulesets/srd-5.2.1.js');
 
 const ADVANCEMENT = ['milestone', 'xp'];
@@ -165,15 +166,8 @@ function createApp({ store = memoryStore(), env = process.env } = {}) {
   }
 
   const routes = {
-    'POST /api/users': (_u, b) => {
-      const token = crypto.randomBytes(24).toString('hex');
-      const user = { id: id(), name: str(b.name, 'name', 60), tokenHash: hash(token) };
-      db.users.push(user);
-      record(user.id, 'user.created', { userId: user.id });
-      return { user: { id: user.id, name: user.name }, token };
-    },
     'GET /api/me': (u) => ({
-      user: { id: u.id, name: u.name },
+      user: { id: u.id, name: u.name, email: u.email || null, hasPassword: !!u.passwordHash },
       worlds: db.worlds
         .map((w) => ({ id: w.id, name: w.name, role: roleIn(u, w.id) }))
         .filter((w) => w.role !== 'none'),
@@ -410,7 +404,8 @@ function createApp({ store = memoryStore(), env = process.env } = {}) {
   const sideQuests = questModule({ db, find, fail, need, record, id, check, rules, chars, people });
   const later = downtime({ db, find, fail, need, record, id, check, rules, chars, onClock: people.onClock, adventures: sideQuests });
   const sim = worldModule({ db, find, fail, need, record, id, check, SEES, VISIBILITY, people, clock: later });
-  Object.assign(routes, table2d.routes, chars.routes, talk.routes, calls.routes, later.routes, people.routes, sideQuests.routes, scenery.routes, sim.routes);
+  const auth = accountModule({ db, find, fail, record, id, check, hash, env });
+  Object.assign(routes, table2d.routes, chars.routes, talk.routes, calls.routes, later.routes, people.routes, sideQuests.routes, scenery.routes, sim.routes, auth.routes);
 
   // GM edits for locations and maps: field whitelist. Ids never change, so renames never break links.
   const EDITABLE = {
@@ -434,7 +429,7 @@ function createApp({ store = memoryStore(), env = process.env } = {}) {
 
   const table = Object.entries(routes).map(([key, fn]) => {
     const [method, pattern] = key.split(' ');
-    return { method, re: new RegExp('^' + pattern.replace(/:id/g, '([\\w-]+)') + '$'), fn };
+    return { method, key: pattern, re: new RegExp('^' + pattern.replace(/:id/g, '([\\w-]+)') + '$'), fn };
   });
 
   const mod = (...p) => path.join(__dirname, 'node_modules', ...p);
@@ -446,36 +441,50 @@ function createApp({ store = memoryStore(), env = process.env } = {}) {
     '/vendor/three/addons/controls/PointerLockControls.js': mod('three', 'examples', 'jsm', 'controls', 'PointerLockControls.js'),
   };
   const STATIC = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8' };
+  // Pages allow only this app's scripts: files from here plus the exact inline scripts of each page (by hash), so injected
+  // markup cannot run code and read the session token. Images may come from anywhere (portraits, maps); LiveKit needs ws(s).
+  const cspFor = (html) => {
+    const hashes = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)].map((m) => `'sha256-${crypto.createHash('sha256').update(m[1]).digest('base64')}'`);
+    return ["default-src 'self'", `script-src 'self' ${hashes.join(' ')}`, "style-src 'self' 'unsafe-inline'", 'img-src * data: blob:', 'media-src * blob:',
+      "connect-src 'self' ws: wss: https:", "frame-ancestors 'none'", "base-uri 'none'", "form-action 'self'", "object-src 'none'"].join('; ');
+  };
   async function handle(req, res) {
     const url = new URL(req.url, 'http://x');
     if (req.method === 'GET' && VENDOR[url.pathname]) { // browser libraries served straight from node_modules (whitelist only)
       const file = VENDOR[url.pathname];
       if (!fs.existsSync(file)) return send(res, 404, { error: `${url.pathname} is not installed (npm install)` });
-      res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'public, max-age=86400' });
+      res.writeHead(200, { ...SECURITY_HEADERS, 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'public, max-age=86400' });
       return res.end(fs.readFileSync(file));
+    }
+    // Health check for Docker, load balancers and uptime monitors: the process answers and the database responds.
+    if (req.method === 'GET' && url.pathname === '/healthz') {
+      try { await store.ping(); return send(res, 200, { ok: true }); } catch { return send(res, 503, { ok: false, error: 'database unreachable' }); }
     }
     if (req.method === 'GET' && !url.pathname.startsWith('/api/')) {
       const name = path.basename(url.pathname) || 'index.html'; // basename: no path traversal out of public/
       const file = path.join(__dirname, 'public', name);
       if (!STATIC[path.extname(name)] || !fs.existsSync(file)) return send(res, 404, { error: 'not found' });
-      res.writeHead(200, { 'content-type': STATIC[path.extname(name)] });
-      return res.end(fs.readFileSync(file));
+      const content = fs.readFileSync(file);
+      res.writeHead(200, { ...SECURITY_HEADERS, 'content-type': STATIC[path.extname(name)],
+        ...(name.endsWith('.html') && { 'content-security-policy': cspFor(content.toString('utf8')) }) });
+      return res.end(content);
     }
     try {
+      auth.throttle(req);
       const live = req.method === 'GET' && url.pathname.match(/^\/api\/scenes\/([\w-]+)\/stream$/);
-      // EventSource cannot send headers, so the stream alone accepts the token as a query parameter.
-      if (live) return table2d.stream(req, res, authenticate(req, url.searchParams.get('token')), live[1]);
+      // EventSource cannot send headers, so streams take a short-lived ticket (POST /api/stream-tickets), never the session token.
+      if (live) return table2d.stream(req, res, authenticate(req, url.searchParams.get('ticket') || ''), live[1]);
       if (req.method === 'GET' && url.pathname === '/api/broadcast/stream') return cast.stream(req, res, url.searchParams.get('key'));
       const chatLive = req.method === 'GET' && url.pathname.match(/^\/api\/campaigns\/([\w-]+)\/chat\/stream$/);
-      if (chatLive) return talk.stream(req, res, authenticate(req, url.searchParams.get('token')), chatLive[1]);
+      if (chatLive) return talk.stream(req, res, authenticate(req, url.searchParams.get('ticket') || ''), chatLive[1]);
       const route = table.find((r) => r.method === req.method && r.re.test(url.pathname)) || fail(404, 'no such route');
       const params = { id: url.pathname.match(route.re)[1], q: url.searchParams.get('q'), query: Object.fromEntries(url.searchParams) };
       const body = req.method === 'GET' ? {} : await readJson(req);
-      const anonymous = req.method === 'POST' && url.pathname === '/api/users';
+      const anonymous = auth.anonymous.has(`${req.method} ${route.key}`);
       if (store.reloading) fail(503, 'recovering from a storage error, retry in a moment');
       const user = anonymous ? null : authenticate(req);
       const generation = store.generation;
-      const out = await route.fn(user, body, params);
+      const out = await route.fn(user, body, params, req);
       if (req.method !== 'GET') {
         // Answer only once the change is stored; if storage failed (now or in a write that included it), say so.
         try { await store.persist(); } catch (e) { console.error('storage write failed:', e.message); }
@@ -488,16 +497,17 @@ function createApp({ store = memoryStore(), env = process.env } = {}) {
     }
   }
 
-  function authenticate(req, query) {
-    const token = query || (req.headers.authorization || '').replace(/^Bearer /, '');
-    const h = token && hash(token);
-    return (h && db.users.find((u) => u.tokenHash === h)) || fail(401, 'sign in first');
-  }
+  const authenticate = (req, ticket) => auth.authenticate(req, ticket);
 
   // After a failed write memory is reloaded; drop live streams so browsers reconnect to the stored state.
   store.onReload(() => { for (const s of [...table2d.subscribers, ...talk.subscribers, ...cast.subscribers]) s.res.end(); });
 
-  return { handle, db, store };
+  // Graceful shutdown: end live streams (browsers reconnect to the next instance), then let the store finish writing.
+  async function shutdown() {
+    for (const s of [...table2d.subscribers, ...talk.subscribers, ...cast.subscribers]) s.res.end();
+    await store.close();
+  }
+  return { handle, db, store, routes: Object.keys(routes), shutdown };
 }
 
 function readJson(req) {
@@ -513,9 +523,12 @@ function readJson(req) {
     });
   });
 }
+const SECURITY_HEADERS = { 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'x-frame-options': 'DENY',
+  'cross-origin-opener-policy': 'same-origin', 'permissions-policy': 'camera=(self), microphone=(self), geolocation=()' };
+const SECRET_FIELDS = new Set(['tokenHash', 'keyHash', 'passwordHash']); // never sent, whatever a route returns
 function send(res, status, body) {
-  res.writeHead(status, { 'content-type': 'application/json' });
-  res.end(JSON.stringify(body, (k, v) => (k === 'tokenHash' || k === 'keyHash' ? undefined : v)));
+  res.writeHead(status, { ...SECURITY_HEADERS, 'content-type': 'application/json', 'cache-control': 'no-store' });
+  res.end(JSON.stringify(body, (k, v) => (SECRET_FIELDS.has(k) ? undefined : v)));
 }
 
 if (require.main === module) {
@@ -528,8 +541,22 @@ if (require.main === module) {
       console.warn('DATABASE_URL is not set: running in memory, nothing will be saved.');
       store = memoryStore();
     }
-    const { handle } = createApp({ store });
-    http.createServer(handle).listen(port, () => console.log(`Living Quest on http://localhost:${port}`));
+    if (process.env.NODE_ENV === 'production' && process.env.DEV_SIGNIN === '1') console.warn('DEV_SIGNIN=1: anyone can sign in with just a name. Do not use this on a public server.');
+    const app = createApp({ store });
+    const server = http.createServer(app.handle);
+    server.listen(port, () => console.log(`Living Quest on http://localhost:${port} (${process.env.NODE_ENV || 'development'})`));
+    let stopping = false;
+    const stop = async (signal) => { // docker stop / systemd send SIGTERM: finish cleanly so no change is lost
+      if (stopping) return;
+      stopping = true;
+      console.log(`${signal}: shutting down`);
+      server.close();
+      setTimeout(() => process.exit(1), 10000).unref(); // never hang a deploy
+      await app.shutdown().catch((e) => console.error(e.message));
+      process.exit(0);
+    };
+    process.on('SIGTERM', () => stop('SIGTERM'));
+    process.on('SIGINT', () => stop('SIGINT'));
   })().catch((e) => { console.error(e.message); process.exit(1); });
 }
 

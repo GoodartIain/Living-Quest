@@ -261,8 +261,10 @@ module.exports = function world({ db, find, fail, need, record, id, check, SEES,
     // Make it canon: { days, decisions, hash } — the hash from the preview the GM looked at.
     'POST /api/campaigns/:id/simulate/commit': (u, b, p) => {
       const c = gmCampaign(u, p.id);
-      if (clock.windowOpen(c)) fail(409, 'publish or cancel the open downtime first');
       const sim = simulate(c, days(b), b.decisions || {});
+      // During downtime the world moves on too, but only up to the downtime's last day (publishing it finishes there).
+      const w = clock.windowOpen(c);
+      if (w && nowOf(c) + sim.days * DAY > w.endDay * DAY + c.clock.minute) fail(409, `downtime ends ${clock.label(find('worlds', c.worldId).settings.calendar, w.endDay)}; simulate up to then, then publish it`);
       if (sim.hash !== b.hash) fail(409, 'the world changed since this preview; preview again');
       if (sim.undecided) fail(409, `${sim.undecided} major development${sim.undecided === 1 ? ' needs' : 's need'} your decision`);
       const commitId = id();

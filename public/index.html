@@ -64,7 +64,7 @@
 </style>
 </head>
 <body>
-<header><h1>Living Quest</h1><button id="voice-toggle" hidden>Voice</button><button id="chat-toggle" hidden>Chat</button><span id="who" class="muted"></span></header>
+<header><h1>Living Quest</h1><button id="voice-toggle" hidden>Voice</button><button id="chat-toggle" hidden>Chat</button><span id="who" class="muted"></span><button id="account-btn" class="link" hidden>Account</button><button id="signout" class="link" hidden>Sign out</button></header>
 <main id="app"></main>
 <p id="err" class="err" role="alert" style="padding:0 16px"></p>
 <aside id="chat" aria-label="Campaign chat" hidden></aside>
@@ -80,6 +80,7 @@
 <script src="triggers.js"></script>
 <script src="world.js"></script>
 <script src="audience.js"></script>
+<script src="account.js"></script>
 <script src="vendor/livekit-client.umd.js"></script>
 <script src="voice.js"></script>
 <script>
@@ -126,11 +127,11 @@ async function render() {
   $app.replaceChildren();
   if (!token) {
     document.getElementById('who').textContent = '';
-    return $app.append(h('section', {}, h('h2', {}, 'Sign in'),
-      h('p', { class: 'muted' }, 'Development sign-in: pick a display name. Your session token is kept in this browser.'),
-      h('form', { onsubmit: onSubmit(async (f) => { const r = await api('POST', '/api/users', f); token = r.token; localStorage.setItem('lq-token', token); render(); }) },
-        field('Name', h('input', { name: 'name', required: true })), h('button', {}, 'Continue'))));
+    document.getElementById('account-btn').hidden = document.getElementById('signout').hidden = true;
+    return renderSignIn(); // public/account.js
   }
+  document.getElementById('account-btn').hidden = document.getElementById('signout').hidden = false;
+  if (state.account) return renderAccount();
   const me = await api('GET', '/api/me');
   if (n !== renders) return; // a newer render started while we waited
   state.me = me.user;
@@ -212,7 +213,7 @@ function renderWorld() {
       onclick: () => run(() => go(c.id)), onkeydown: (e) => e.key === 'Enter' && run(() => go(c.id)) },
     h('circle', { svg: 1, cx: c.x, cy: c.y * 0.75, r: 1.6 }), h('text', { svg: 1, x: c.x + 2.2, y: c.y * 0.75 + 1 }, c.name)));
   const pick = state.pick && h('circle', { svg: 1, cx: state.pick.x, cy: state.pick.y * 0.75, r: 1.2, fill: 'none', stroke: 'currentColor', 'stroke-width': 0.4 });
-  const svg = h('svg', { class: 'map', viewBox: '0 0 100 75', role: 'img', 'aria-label': v.map.name },
+  const svg = h('svg', { class: 'map', viewBox: '0 0 100 75', role: 'group', 'aria-label': `Map: ${v.map.name}` },
     v.map.imageUrl && h('image', { svg: 1, href: v.map.imageUrl, x: 0, y: 0, width: 100, height: 75, preserveAspectRatio: 'xMidYMid slice' }), pins, pick);
   if (gm) svg.addEventListener('click', (e) => {
     if (e.target.closest('.pin')) return;
@@ -353,10 +354,12 @@ async function openScene(id) {
   state.world = await api('GET', `/api/worlds/${state.world.id}`); // fresh member list for token controllers
   await loadCharacters();
   const first = await api('GET', `/api/scenes/${id}`); // surfaces permission errors before streaming
-  const es = new EventSource(`/api/scenes/${id}/stream?token=${encodeURIComponent(token)}`);
+  const es = new EventSource(await streamUrl(`/api/scenes/${id}/stream`));
   state.scene = { id, es, view: first, mode: 'move', drag: null, measure: null, busy: false, stale: false };
   // Never redraw mid-gesture: replacing the SVG would drop the pointer capture.
   es.onmessage = (e) => { const sc = state.scene; if (!sc || sc.es !== es) return; sc.view = JSON.parse(e.data); if (sc.busy) sc.stale = true; else { drawBoard(); drawEncounter(); } };
+  // Tickets last 10 minutes: when the browser's own reconnect is refused, reopen the scene with a fresh one.
+  es.onerror = () => { if (es.readyState === EventSource.CLOSED) setTimeout(() => { if (state.scene && state.scene.es === es) run(() => openScene(id)); }, 3000); };
   es.addEventListener('gone', () => { closeScene(); document.getElementById('err').textContent = 'This scene is no longer shared with you.'; render(); });
   render();
 }
@@ -450,7 +453,17 @@ function drawBoard() {
   if (scene.walls.length) svg.append(S('path', { d: scene.walls.map((w) => `M${w.x1} ${w.y1}L${w.x2} ${w.y2}`).join(''), stroke: '#3b2f22', 'stroke-width': 0.15, 'stroke-linecap': 'round' }));
   for (const t of tokens) {
     const r = t.size / 2;
-    const g = S('g', { class: 'tok', transform: `translate(${t.x + r} ${t.y + r})`, 'data-id': t.id, style: t.mine && sc.mode === 'move' ? 'cursor:grab' : '' },
+    // Keyboard: Tab to your own tokens, arrow keys move them one square (Milestone 13 accessibility).
+    const g = S('g', { class: 'tok', transform: `translate(${t.x + r} ${t.y + r})`, 'data-id': t.id, style: t.mine && sc.mode === 'move' ? 'cursor:grab' : '',
+      ...(t.mine && { tabindex: 0, role: 'button', 'aria-label': `${t.name} at column ${t.x + 1}, row ${t.y + 1}. Arrow keys move.`,
+        onkeydown: (e) => {
+          const d = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key];
+          if (!d) return;
+          e.preventDefault();
+          const x = clamp(t.x + d[0], 0, scene.cols - t.size), y = clamp(t.y + d[1], 0, scene.rows - t.size);
+          sc.refocus = t.id; // keep keyboard focus on this token after the board redraws
+          run(() => api('PATCH', `/api/tokens/${t.id}`, { x, y }));
+        } }) },
       encounter && encounter.turnTokenId === t.id && S('circle', { r: r * 0.98, fill: 'none', stroke: '#ffd54a', 'stroke-width': 0.12 }),
       S('circle', { r: r * 0.8, fill: t.color, stroke: t.mine ? '#fff' : '#0008', 'stroke-width': 0.06, opacity: t.visibility === 'gm' ? 0.6 : 1, 'stroke-dasharray': t.visibility === 'gm' ? '0.15 0.1' : null }),
       S('text', { y: r * 0.8 + 0.35, 'text-anchor': 'middle' }, t.name),
@@ -553,6 +566,7 @@ function drawBoard() {
     }
   });
   host.replaceChildren(svg);
+  if (sc.refocus) { const el = svg.querySelector(`.tok[data-id="${sc.refocus}"]`); if (el) el.focus(); }
 }
 let drawQueued = false;
 function drawLater() { if (!drawQueued) { drawQueued = true; requestAnimationFrame(() => { drawQueued = false; drawBoard(); }); } }

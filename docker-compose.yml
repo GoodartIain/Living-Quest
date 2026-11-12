@@ -1,13 +1,13 @@
-# Self-hosting: copy .env.example to .env and set the LiveKit key/secret, then `docker compose up`
-# and open http://localhost:3000. Data lives in the `db` volume.
-# Voice and video on other machines need HTTPS for the app and WSS for LiveKit (browsers only allow
-# microphones and cameras on secure pages) and the LiveKit ports below open: see docs/DEPLOY.md.
+# Production on one server: copy .env.example to .env, fill it in, point DNS for APP_DOMAIN and VOICE_DOMAIN at the
+# server, open ports 80, 443, 7881/tcp and 50000-50100/udp, then `docker compose up -d`. See docs/OPERATIONS.md.
+# Local testing without domains: `docker compose -f docker-compose.yml -f docker-compose.local.yml up`.
 services:
   db:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_USER: livingquest
-      POSTGRES_PASSWORD: livingquest # change before exposing the database beyond this compose network
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: livingquest
     volumes: [db:/var/lib/postgresql/data]
     healthcheck:
@@ -16,7 +16,8 @@ services:
       retries: 30
   livekit: # open-source WebRTC media server for the campaign voice/video calls
     image: livekit/livekit-server:v1.13.11
-    command: --bind 0.0.0.0 --node-ip ${LIVEKIT_NODE_IP:-127.0.0.1}
+    restart: unless-stopped
+    command: --bind 0.0.0.0 --node-ip ${LIVEKIT_NODE_IP:?set LIVEKIT_NODE_IP in .env}
     environment:
       LIVEKIT_KEYS: "${LIVEKIT_API_KEY:?set LIVEKIT_API_KEY in .env}: ${LIVEKIT_API_SECRET:?set LIVEKIT_API_SECRET in .env}"
       LIVEKIT_CONFIG: |
@@ -25,18 +26,45 @@ services:
           tcp_port: 7881
           port_range_start: 50000
           port_range_end: 50100
-    ports: ["7880:7880", "7881:7881", "50000-50100:50000-50100/udp"]
+    ports: ["7881:7881", "50000-50100:50000-50100/udp"] # media; signalling goes through Caddy (wss://VOICE_DOMAIN)
   app:
     build: .
+    restart: unless-stopped
     environment:
-      DATABASE_URL: postgres://livingquest:livingquest@db:5432/livingquest
-      LIVEKIT_URL: ${LIVEKIT_PUBLIC_URL:-ws://localhost:7880} # what browsers connect to
+      NODE_ENV: production
+      TRUST_PROXY: "1" # behind Caddy: rate limits use the real client address
+      DATABASE_URL: postgres://livingquest:${POSTGRES_PASSWORD}@db:5432/livingquest
+      LIVEKIT_URL: wss://${VOICE_DOMAIN:?set VOICE_DOMAIN in .env} # what browsers connect to
       LIVEKIT_API_URL: http://livekit:7880 # how the app reaches LiveKit inside compose
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
-    ports: ["3000:3000"]
+      DEV_SIGNIN: ${DEV_SIGNIN:-}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-600}
+      SIGNUPS_PER_HOUR: ${SIGNUPS_PER_HOUR:-20}
     depends_on:
       db: { condition: service_healthy }
       livekit: { condition: service_started }
+  caddy: # HTTPS (Let's Encrypt) for the app and LiveKit
+    image: caddy:2.8.4-alpine
+    restart: unless-stopped
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?set APP_DOMAIN in .env}
+      VOICE_DOMAIN: ${VOICE_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env}
+    ports: ["80:80", "443:443"]
+    volumes: ["./Caddyfile:/etc/caddy/Caddyfile:ro", "caddy:/data"]
+    depends_on: [app, livekit]
+  backup: # one consistent backup a day into ./backups, keeping BACKUP_KEEP_DAYS days (copy them off the server too)
+    build: .
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://livingquest:${POSTGRES_PASSWORD}@db:5432/livingquest
+      KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+    volumes: ["./backups:/backups"]
+    user: root # writes to the mounted folder; backup files themselves are created private (0600)
+    command: ["sh", "-c", "while true; do node scripts/backup.js /backups/lq-$$(date +%F).json; sleep 86400; done"]
+    depends_on:
+      db: { condition: service_healthy }
 volumes:
   db:
+  caddy:

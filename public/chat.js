@@ -23,8 +23,17 @@ function startChat(campaignId) {
   leaveVoice(); // a call belongs to one campaign
   Object.assign(chat, { campaignId, messages: [], unread: 0 });
   api('GET', `/api/campaigns/${campaignId}/voice`).then((v) => { voice.settings = v; showVoiceButton(v.enabled); }).catch(() => showVoiceButton(false));
-  const es = new EventSource(`/api/campaigns/${campaignId}/chat/stream?token=${encodeURIComponent(token)}`);
-  chat.es = es;
+  chat.es = { close() {} }; // placeholder while the stream ticket is fetched
+  streamUrl(`/api/campaigns/${campaignId}/chat/stream`).then((url) => {
+    if (chat.campaignId !== campaignId) return;
+    const es = new EventSource(url);
+    chat.es = es;
+    // A ticket lasts 10 minutes: when the browser's own reconnect is refused, start over with a new one.
+    es.onerror = () => { if (es.readyState === EventSource.CLOSED && chat.es === es) { chat.es = null; setTimeout(() => startChat(campaignId), 3000); } };
+    listenChat(es);
+  }).catch(() => {});
+}
+function listenChat(es) {
   es.addEventListener('snapshot', (e) => { const d = JSON.parse(e.data); Object.assign(chat, { role: d.role, members: d.members, messages: d.messages }); drawChat(true); });
   es.addEventListener('message', (e) => {
     const m = JSON.parse(e.data);

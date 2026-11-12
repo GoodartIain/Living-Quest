@@ -1,0 +1,67 @@
+# Every push and pull request: the full test suite on PostgreSQL with a real LiveKit server, then the browser checks
+# (acceptance scripts, 2D/3D compatibility, accessibility audit) in Chromium.
+name: CI
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: { POSTGRES_PASSWORD: postgres, POSTGRES_DB: lq_test }
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 2s --health-retries 30
+    env:
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/lq_test
+      LIVEKIT_TEST_URL: ws://127.0.0.1:7880
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm audit --omit=dev
+      - name: LiveKit server (dev mode, keys devkey/secret)
+        run: |
+          curl -fsSL -o lk.tgz https://github.com/livekit/livekit/releases/download/v1.13.11/livekit_1.13.11_linux_amd64.tar.gz
+          tar xzf lk.tgz livekit-server
+          ./livekit-server --dev --bind 127.0.0.1 --node-ip 127.0.0.1 > livekit.log 2>&1 &
+          for i in $(seq 30); do curl -fs http://127.0.0.1:7880 >/dev/null && break; sleep 1; done
+      - run: npm test
+
+  browser:
+    runs-on: ubuntu-24.04
+    needs: test
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: { POSTGRES_PASSWORD: postgres, POSTGRES_DB: livingquest }
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 2s --health-retries 30
+    env:
+      BASE_URL: http://localhost:3926
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm install --no-save playwright@1.63.0 && npx playwright install --with-deps chromium
+      - name: LiveKit server
+        run: |
+          curl -fsSL -o lk.tgz https://github.com/livekit/livekit/releases/download/v1.13.11/livekit_1.13.11_linux_amd64.tar.gz
+          tar xzf lk.tgz livekit-server
+          ./livekit-server --dev --bind 127.0.0.1 --node-ip 127.0.0.1 > livekit.log 2>&1 &
+      - name: App
+        run: |
+          DATABASE_URL=postgres://postgres:postgres@localhost:5432/livingquest PORT=3926 SIGNUPS_PER_HOUR=100000 RATE_LIMIT_PER_MINUTE=1000000 \
+            LIVEKIT_URL=ws://127.0.0.1:7880 LIVEKIT_API_KEY=devkey LIVEKIT_API_SECRET=secret node server.js > app.log 2>&1 &
+          for i in $(seq 30); do curl -fs http://localhost:3926/healthz && break; sleep 1; done
+      - name: Acceptance scripts (Milestones 5–12)
+        run: for m in 5 6 7 8 9 10 11 12; do node scripts/acceptance-m$m.js; done
+      - run: node scripts/compat-2d3d.js
+      - run: node scripts/a11y-audit.js
+      - run: ROOMS=10 SECONDS=20 node scripts/load-test.js
+      - if: failure()
+        run: tail -100 app.log livekit.log

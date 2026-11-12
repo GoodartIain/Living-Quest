@@ -41,7 +41,9 @@ async function boot({ store, env = {} } = {}) {
   const listen = (sceneId, token) => listenTo(`/api/scenes/${sceneId}/stream`, token);
   async function listenTo(path, token, param = 'token') {
     const ac = new AbortController();
-    const res = await fetch(`${base}${path}?${param}=${token}`, { signal: ac.signal });
+    // Session tokens never go in URLs: swap one for a short-lived stream ticket first (broadcast keys go as they are).
+    const cred = param === 'token' ? (await (await fetch(`${base}/api/stream-tickets`, { method: 'POST', headers: { authorization: `Bearer ${token}` } })).json()).ticket : token;
+    const res = await fetch(`${base}${path}?${param === 'token' ? 'ticket' : param}=${cred}`, { signal: ac.signal });
     const msgs = [];
     let wake = () => {};
     if (res.ok) (async () => {

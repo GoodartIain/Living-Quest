@@ -274,7 +274,8 @@ module.exports = function downtime({ db, find, fail, need, record, id, check, ru
       for (const a of open) { a.status = 'cancelled'; if (adventures) adventures.abandon(a); }
       w.status = 'published';
       w.publishedAt = new Date().toISOString();
-      moveClock(c, w.endDay, c.clock.minute); // in-game time moves only now, when the GM publishes
+      // In-game time reaches the end of downtime now (the world simulation may already have moved it part of the way).
+      if (c.clock.day < w.endDay) moveClock(c, w.endDay, c.clock.minute);
       // Side-quest outcomes (discoveries, items, quests, world events…) land after the clock moved, so NPCs react at the new time.
       const effects = new Map(approved.map((a) => [a.id, adventures ? adventures.apply(a, c, u.id) : []]));
       const cal = calendarOf(c);

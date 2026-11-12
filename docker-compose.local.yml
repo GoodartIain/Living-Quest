@@ -1,0 +1,16 @@
+# Local testing on one computer, no domains or HTTPS:
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up
+# then open http://localhost:3000 (browsers allow camera and microphone on localhost). .env still needs
+# POSTGRES_PASSWORD, LIVEKIT_API_KEY, LIVEKIT_API_SECRET; the domain values can stay as the examples.
+services:
+  livekit:
+    command: --bind 0.0.0.0 --node-ip 127.0.0.1
+    ports: ["7880:7880", "7881:7881", "50000-50100:50000-50100/udp"]
+  app:
+    environment:
+      NODE_ENV: development
+      TRUST_PROXY: "0"
+      LIVEKIT_URL: ws://localhost:7880
+    ports: ["3000:3000"]
+  caddy:
+    profiles: [public] # not started locally

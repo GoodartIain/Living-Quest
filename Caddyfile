@@ -1,0 +1,15 @@
+# HTTPS in front of the app and LiveKit. Caddy obtains and renews Let's Encrypt certificates automatically.
+{
+	email {$ACME_EMAIL}
+}
+
+{$APP_DOMAIN} {
+	encode gzip
+	reverse_proxy app:3000 {
+		flush_interval -1 # live streams (server-sent events) must not be buffered
+	}
+}
+
+{$VOICE_DOMAIN} {
+	reverse_proxy livekit:7880
+}
