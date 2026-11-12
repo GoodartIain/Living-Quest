@@ -10,7 +10,8 @@ Status reflects code in this repository, not intent.
 | 3 | 2D tabletop | **Done.** Scenes on any location (square or gridless, size, background image, share level), tokens with colour/size/visibility/controlling player/optional wiki link, GM-painted fog of war, measuring (5 ft squares), encounter tracker (initiative order, turns, rounds; hidden combatants and their turns stay hidden), live sync to every viewer, each with their own filtered view. |
 | 4 | Character creation and advancement | **Done, including the follow-up gaps** (armour, spells catalogue, masteries, level-up choices, multiclassing, homebrew; see below). Seven-step guided creation (SRD 5.2.1: 9 species, 12 classes, 4 backgrounds, standard array or point buy), character sheets with clickable checks/saves, HP/temp HP, conditions, inventory and currency, server-side dice with public/private/GM-only rolls and a scene dice log, XP awards by category to a character or the party, milestone awards, automatic or GM-approved level-ups, level history, tokens linked to characters. |
 | 5 | Live voice/video sessions | **Done.** GM Director Mode foundation: live scene with a pushed "join" banner for players, live encounter status and next turn, party HP/AC/conditions/death saves and pending approvals, private GM notes, story beats, quick create (NPC, item, quest, rumour, lore), chat and call shortcuts. Campaign chat (table, whispers, GM, audience channels; speak as character; moderation; rate limit) and a self-hosted LiveKit call per campaign (camera, microphone, screen share, push-to-talk, devices, volume, focus, picture-in-picture, GM mute, spectators listen-only by GM choice), both persisting across views. |
-| 6–13 | 3D, spectator broadcast, downtime, NPCs, … | Not started (designed in `ARCHITECTURE.md`). |
+| 6 | 3D foundation | **Done.** Scene walls (GM draws them on the 2D board along grid lines), a Three.js 3D view of the same scene with a tactical (orbit) camera and a first-person camera (mouse look, WASD, Q/E turn, wall collision), tokens with name labels and turn ring, fog, background image as floor texture. First-person movement moves your token for everyone. |
+| 7–13 | Spectator broadcast, downtime, NPCs, … | Not started (designed in `ARCHITECTURE.md`). |
 
 ## Acceptance
 
@@ -60,6 +61,12 @@ Milestone 5: *six players and a GM can participate through a browser, move betwe
 
 Milestone 5 completion (Director Mode): `test/director.test.js` — only the GM edits the director; players and spectators never receive notes, beats or the mute list in the world data; the live scene is announced per viewer (players yes, spectators not for a party scene); party HP/AC/pending choices are GM-only (mutation-checked by sending players the full campaign). Browser: GM makes a scene live and the player's banner appears without reload; notes being edited survive the 5-second refresh; party panel shows a character drop to 0 HP within one refresh; next turn advances; the joining player sees no hidden goblin and no notes. Passed.
 
+Milestone 6: *a user can explore a simple room in first-person, switch to tactical view and see the same persistent characters and object state.*
+
+- Automated: `test/walls.test.js` — wall validation (diagonal, zero length, out of bounds, players refused), live push, players under fog receive only the unit wall pieces bordering explored cells (nothing of unexplored walls), the GM sees all, walls block shrinking the scene; mutation-checked (full walls sent to players). 25/25 pass with PostgreSQL and LiveKit.
+- Acceptance (`scripts/acceptance-m6.js`, Chromium with software WebGL): a player in a 6×5 walled room walks north in first person and is stopped by the wall (stays inside); their move is stored and the GM's 2D board, the player's 3D tactical view and 2D board all show the character in the same place; their own body is hidden in first person and visible in tactical; a GM-only goblin never appears in any 3D view. PASS. Screenshots of both views checked by eye.
+- Found and fixed: the 2D/3D switch first reused the scene data's field name and broke the scene page.
+
 ## Known debt / defects
 
 - Auth is a display name + bearer token in localStorage. Replace with real accounts (OIDC or email magic link) before any public hosting.
@@ -72,6 +79,7 @@ Milestone 5 completion (Director Mode): `test/director.test.js` — only the GM 
 - Data to verify against the SRD 5.2.1 PDF: Trident (kept at 1d8 / Versatile 1d10, the dataset says 1d6 / 1d8), Sling (kept bludgeoning, the dataset says piercing), whether the 2024 Rogue skill list includes Performance (kept without it).
 - Homebrew: species, backgrounds and classes only (no subclasses, feats, spells or items); a homebrew entry cannot be edited, only deleted and re-created while unused; homebrew classes have no starting equipment.
 - Tabletop: no hex grid, no drawing tool, no dynamic lighting/line of sight, no HP/conditions on tokens without a character, controllers can only be set when the token is created (the API accepts changes, the UI does not offer it), measurement is not shared with other players.
+- 3D: no doors or interactive objects (Milestone 10), no isometric or third-person camera, no lighting/shadows/line of sight (players see what fog reveals, as in 2D), no glTF models or 3D scene builder (tokens are capsules), no touch controls for first person (tactical works on touch), wall collision is client-side only (the server checks bounds and ownership, not walls), walls are horizontal/vertical grid lines only.
 - Director Mode: refreshes by polling every 5 s; no downtime status, NPC simulation alerts, world events, scene sequencer, music/lighting/weather triggers, "View as player/spectator" (those depend on Milestones 7–11 or are later work).
 - Voice/video: one call per campaign (no separate session rooms or breakout rooms), no spatial audio, no recording/transcription (needs consent records first), no server-side moderation beyond mute (kick/ban from the call), no TURN configured by default (strict firewalls), and production needs HTTPS/WSS in front of the app and LiveKit (see `docs/DEPLOY.md`). The compose file was not run (no Docker here); the same LiveKit binary and configuration were tested directly.
 - Chat: no message editing, attachments, mentions/notifications or search; history shown is the last 200 messages per viewer; all messages stay in memory (the store's append-only path keeps writes cheap, but very long-running campaigns will need paging from the database).
@@ -82,4 +90,4 @@ Milestone 5 completion (Director Mode): `test/director.test.js` — only the GM 
 
 ## Recommended next action
 
-Milestone 6 (3D foundation). Also still open: verify the three SRD data points listed above against the SRD 5.2.1 PDF.
+Milestone 7 (livestream spectator MVP: spectator role views, a broadcast-safe presentation page for OBS). Also still open: verify the three SRD data points listed above against the SRD 5.2.1 PDF. Also still open: verify the three SRD data points listed above against the SRD 5.2.1 PDF.

@@ -8,6 +8,29 @@ module.exports = function tabletop({ db, find, fail, need, viewer, record, id, S
   const subscribers = new Set(); // { res, user, sceneId }
   const cell = (t) => `${Math.floor(t.x)},${Math.floor(t.y)}`; // shortcut: a large token counts as its top-left cell for fog; use its footprint when tokens >1 cell matter
 
+  // Walls run along grid lines between cell corners (x 0..cols, y 0..rows), horizontal or vertical.
+  function validWalls(list, cols, rows) {
+    if (!Array.isArray(list) || list.length > 500) fail(400, 'walls must be a list of up to 500');
+    return list.map((w) => {
+      const [x1, y1, x2, y2] = [num(w.x1, 'x1', 0, cols, true), num(w.y1, 'y1', 0, rows, true), num(w.x2, 'x2', 0, cols, true), num(w.y2, 'y2', 0, rows, true)];
+      if ((x1 === x2) === (y1 === y2)) fail(400, 'a wall runs along one grid line and has a length');
+      return { x1, y1, x2, y2 };
+    });
+  }
+  // Players under fog get only the unit wall pieces that border a revealed cell, so unexplored layout stays hidden.
+  function visibleWalls(walls, revealed) {
+    const out = [];
+    for (const w of walls) {
+      const horizontal = w.y1 === w.y2;
+      const [a, b] = horizontal ? [Math.min(w.x1, w.x2), Math.max(w.x1, w.x2)] : [Math.min(w.y1, w.y2), Math.max(w.y1, w.y2)];
+      for (let i = a; i < b; i++) {
+        const near = horizontal ? [`${i},${w.y1 - 1}`, `${i},${w.y1}`] : [`${w.x1 - 1},${i}`, `${w.x1},${i}`];
+        if (near.some((k) => revealed.has(k))) out.push(horizontal ? { x1: i, y1: w.y1, x2: i + 1, y2: w.y1 } : { x1: w.x1, y1: i, x2: w.x1, y2: i + 1 });
+      }
+    }
+    return out;
+  }
+
   function sceneView(user, scene) {
     const v = viewer(user, scene.worldId);
     if (!v.seesLoc(find('locations', scene.locationId)) || !SEES[v.role].includes(scene.visibility)) fail(404, 'scene not found');
@@ -30,7 +53,8 @@ module.exports = function tabletop({ db, find, fail, need, viewer, record, id, S
     const current = enc && enc.combatants[enc.turn];
     return {
       role: v.role,
-      scene: { ...scene, fog: { enabled: scene.fog.enabled, revealed: scene.fog.enabled || gm ? scene.fog.revealed : [] }, encounter: undefined },
+      scene: { ...scene, fog: { enabled: scene.fog.enabled, revealed: scene.fog.enabled || gm ? scene.fog.revealed : [] }, encounter: undefined,
+        walls: gm || !scene.fog.enabled ? scene.walls : visibleWalls(scene.walls, revealed) },
       tokens,
       encounter: enc && {
         round: enc.round,
@@ -84,7 +108,7 @@ module.exports = function tabletop({ db, find, fail, need, viewer, record, id, S
         cols: num(b.cols ?? 20, 'cols', 1, 200, true), rows: num(b.rows ?? 15, 'rows', 1, 200, true),
         backgroundUrl: b.backgroundUrl ? check.safeUrl(b.backgroundUrl) : '',
         visibility: oneOf(b.visibility ?? 'gm', VISIBILITY, 'visibility'), // scenes start hidden until the GM shares them
-        fog: { enabled: false, revealed: [] }, encounter: null };
+        fog: { enabled: false, revealed: [] }, encounter: null, walls: [] };
       db.scenes.push(scene);
       record(u.id, 'scene.created', { sceneId: scene.id, locationId: loc.id });
       return scene;
@@ -100,10 +124,12 @@ module.exports = function tabletop({ db, find, fail, need, viewer, record, id, S
       if (b.backgroundUrl !== undefined) c.backgroundUrl = b.backgroundUrl ? check.safeUrl(b.backgroundUrl) : '';
       if (b.visibility !== undefined) c.visibility = oneOf(b.visibility, VISIBILITY, 'visibility');
       if (b.fogEnabled !== undefined) c.fog = { ...s.fog, enabled: bool(b.fogEnabled, 'fogEnabled') };
+      if (b.walls !== undefined) c.walls = validWalls(b.walls, c.cols ?? s.cols, c.rows ?? s.rows);
       if (!Object.keys(c).length) fail(400, 'nothing to change');
       if ((c.cols ?? s.cols) < s.cols || (c.rows ?? s.rows) < s.rows) {
         const [cols, rows] = [c.cols ?? s.cols, c.rows ?? s.rows];
         if (db.tokens.some((t) => t.sceneId === s.id && (t.x + t.size > cols || t.y + t.size > rows))) fail(409, 'move tokens inside the new size first');
+        if ((c.walls ?? s.walls).some((w) => Math.max(w.x1, w.x2) > cols || Math.max(w.y1, w.y2) > rows)) fail(409, 'remove walls outside the new size first');
       }
       Object.assign(s, c);
       changed(s, u.id, 'scene.updated', { sceneId: s.id, fields: Object.keys(c) });

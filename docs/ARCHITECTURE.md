@@ -108,7 +108,7 @@ erDiagram
 
 Stable ids: every reference stores an id, never a name. Renaming is a field update (tested in `test/slice.test.js`).
 
-## 4. Shared 2D/3D scene specification (2D subset implemented)
+## 4. Shared 2D/3D scene specification (2D board, walls and a basic 3D view implemented)
 
 ```ts
 type Vec3 = [number, number, number];          // metres; y is up; 2D uses y = elevation, plots x/z
@@ -123,6 +123,8 @@ interface Zone { id; polygon: Vec3[]; trigger: Interaction[] }
 - Both renderers read the same `Scene`; neither owns state. A 2D scene is a 3D scene with walls of default height.
 - Implemented now (`tabletop.js`): `scenes` (location, grid square|none, cols, rows, background, visibility, fog {enabled, revealed cells}, encounter {round, turn, combatants sorted by initiative}) and `tokens` (scene, x, y in cells, size, colour, visibility, controlledBy, optional wiki page). Positions are 2D cells for now; adding `z`/rotation is additive.
 - Fog is cell-based and GM-painted; a player sees a token only if its visibility allows and its cell is revealed, or they control it. Walls/line-of-sight come with dynamic lighting later.
+- Walls (implemented): `scenes.walls` = horizontal/vertical segments between grid corners, drawn by the GM on the 2D board. For players under fog the server sends only unit wall pieces that border a revealed cell.
+- 3D renderer (implemented, `public/scene3d.js`): Three.js 0.186 (served from `node_modules` via an import map, loaded only when a user switches to 3D) renders the same per-viewer scene payload as the 2D board — floor (background image as texture when CORS allows), grid, fog, walls (2 cells high) and token capsules with labels. Cameras: tactical (OrbitControls) and first person (PointerLockControls, WASD, Q/E, collision against walls and scene edges). First-person movement is sent as normal token moves (server validates ownership and bounds), so every view stays in sync through the existing scene stream. No React Three Fiber: the app has no React, and the view is ~250 lines.
 - The 2D renderer is plain SVG in `public/index.html`, not PixiJS: it handles a 200×200 board without a build step. Switch to PixiJS when scenes need thousands of sprites, animated effects or lighting.
 - Line of sight and fog are computed **server-side** from walls; clients receive only revealed placements. Camera mode (top-down, iso, orbit, 3rd, 1st person) is purely a client view and cannot reveal more than the projection sent.
 - 2D→3D conversion: GM traces walls over the floor plan → `Wall[]` with chosen height → editable geometry. Any automated detection only proposes walls.

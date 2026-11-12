@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Living Quest</title>
+<script type="importmap">{ "imports": { "three": "./vendor/three/three.module.js", "three/addons/": "./vendor/three/addons/" } }</script>
 <style>
   :root { --bg:#f6f3ee; --fg:#1f1d1a; --muted:#6b655c; --card:#fff; --line:#ddd5c8; --accent:#7a4b1f; --note:#fdf4e3; }
   @media (prefers-color-scheme: dark) { :root { --bg:#16140f; --fg:#ece6dc; --muted:#a39a8c; --card:#211e18; --line:#3a352c; --accent:#e0a66a; --note:#2b2418; } }
@@ -323,7 +324,7 @@ function pageEditor(v) {
 
 // ---- Milestone 3: live 2D scene. The server pushes a per-viewer projection; we only draw what arrives.
 function closeScene() {
-  if (state.scene) state.scene.es.close();
+  if (state.scene) { state.scene.es.close(); if (state.scene.three) state.scene.three.dispose(); }
   state.scene = null;
 }
 async function openScene(id) {
@@ -341,7 +342,8 @@ async function openScene(id) {
 
 function renderScene() {
   const sc = state.scene, v = sc.view, gm = v.role === 'gm';
-  const modes = [['move', 'Move'], ['measure', 'Measure'], ...(gm ? [['reveal', 'Reveal fog'], ['hide', 'Hide fog'], ['place', 'Place token']] : [])];
+  const modes = [['move', 'Move'], ['measure', 'Measure'], ...(gm ? [['reveal', 'Reveal fog'], ['hide', 'Hide fog'], ['place', 'Place token'], ['wall', 'Draw walls'], ['erase', 'Erase walls']] : [])];
+  const views = [['2d', '2D board'], ['tactical', '3D tactical'], ['first', '3D first person']];
   $app.append(h('section', {},
     h('div', { class: 'crumbs' }, h('button', { class: 'link', onclick: () => run(() => go(state.loc.location.id)) }, `‹ ${state.loc.location.name}`), '›', h('strong', {}, v.scene.name), h('span', {}, `(${v.role})`)),
     h('div', { class: 'modes', role: 'toolbar', 'aria-label': 'Board tools', style: 'display:flex;gap:6px;flex-wrap:wrap;margin:8px 0' },
@@ -350,7 +352,13 @@ function renderScene() {
         e.target.parentNode.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', String(x === e.target)));
         drawBoard();
       } }, label)),
-      h('span', { id: 'readout', class: 'muted', 'aria-live': 'polite' }))));
+      h('span', { id: 'readout', class: 'muted', 'aria-live': 'polite' })),
+    h('div', { class: 'modes', role: 'toolbar', 'aria-label': 'View', style: 'display:flex;gap:6px;flex-wrap:wrap' },
+      views.map(([m, label]) => h('button', { 'aria-pressed': String((sc.display || '2d') === m), onclick: (e) => {
+        sc.display = m;
+        e.target.parentNode.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', String(x === e.target)));
+        if (sc.three && m !== '2d') sc.three.setMode(m); else drawBoard();
+      } }, label)))));
   $app.append(h('div', { class: 'row' },
     h('section', {}, h('div', { id: 'board' })),
     h('section', {}, h('div', { id: 'enc' }), diceBox(v), gm && sceneGmTools(v))));
@@ -363,10 +371,26 @@ function boardPoint(svg, e) {
 }
 const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
 
+// 3D: the same per-viewer scene data drawn by public/scene3d.js (loaded on first use). Moving in first person moves your token.
+async function draw3d(host) {
+  const sc = state.scene;
+  if (sc.three && sc.threeHost === host) return sc.three.update(sc.view);
+  if (sc.three) sc.three.dispose();
+  sc.threeHost = host;
+  sc.three = null;
+  const { mount } = await import('./scene3d.js');
+  if (state.scene !== sc || sc.threeHost !== host || (sc.display || '2d') === '2d') return; // the user moved on while it loaded
+  sc.three = mount(host, sc.view, { mode: sc.display, userId: state.me && state.me.id,
+    onMove: (id, x, y) => api('PATCH', `/api/tokens/${id}`, { x, y }).catch((e) => { document.getElementById('err').textContent = e.message; }) });
+}
+
 function drawBoard() {
   const host = document.getElementById('board');
   if (!host) return;
-  const sc = state.scene, { scene, tokens, role, encounter } = sc.view, gm = role === 'gm';
+  const sc = state.scene;
+  if ((sc.display || '2d') !== '2d') return run(() => draw3d(host));
+  if (sc.three) { sc.three.dispose(); sc.three = null; sc.threeHost = null; }
+  const { scene, tokens, role, encounter } = sc.view, gm = role === 'gm';
   const S = (tag, a, ...k) => h(tag, { svg: 1, ...a }, ...k);
   const svg = h('svg', { class: 'board', viewBox: `0 0 ${scene.cols} ${scene.rows}`, role: 'application', 'aria-label': `${scene.name} board` });
   if (scene.backgroundUrl) svg.append(S('image', { href: scene.backgroundUrl, width: scene.cols, height: scene.rows, preserveAspectRatio: 'none' }));
@@ -381,6 +405,7 @@ function drawBoard() {
     for (let x = 0; x < scene.cols; x++) for (let y = 0; y < scene.rows; y++) if (!open.has(`${x},${y}`)) d.push(`M${x} ${y}h1v1h-1z`);
     svg.append(S('path', { d: d.join(''), fill: '#111', opacity: gm ? 0.45 : 1, 'shape-rendering': 'crispEdges' }));
   }
+  if (scene.walls.length) svg.append(S('path', { d: scene.walls.map((w) => `M${w.x1} ${w.y1}L${w.x2} ${w.y2}`).join(''), stroke: '#3b2f22', 'stroke-width': 0.15, 'stroke-linecap': 'round' }));
   for (const t of tokens) {
     const r = t.size / 2;
     const g = S('g', { class: 'tok', transform: `translate(${t.x + r} ${t.y + r})`, 'data-id': t.id, style: t.mine && sc.mode === 'move' ? 'cursor:grab' : '' },
@@ -399,11 +424,17 @@ function drawBoard() {
   const paintOverlay = () => overlay.replaceChildren(...[
     sc.measure && S('line', { x1: sc.measure.a.x, y1: sc.measure.a.y, x2: sc.measure.b.x, y2: sc.measure.b.y, stroke: '#c0392b', 'stroke-width': 0.08, 'stroke-dasharray': '0.2 0.1' }),
     sc.rect && S('rect', { ...sc.rect, fill: sc.mode === 'reveal' ? '#fff5' : '#0005', stroke: '#fff', 'stroke-width': 0.05 }),
+    sc.wall && S('line', { x1: sc.wall.x1, y1: sc.wall.y1, x2: sc.wall.x2, y2: sc.wall.y2, stroke: '#c0392b', 'stroke-width': 0.15, 'stroke-linecap': 'round' }),
   ].filter(Boolean));
   paintOverlay();
   svg.append(overlay);
 
   const cellOf = (p) => ({ x: clamp(Math.floor(p.x), 0, scene.cols - 1), y: clamp(Math.floor(p.y), 0, scene.rows - 1) });
+  const cornerOf = (p) => ({ x: clamp(Math.round(p.x), 0, scene.cols), y: clamp(Math.round(p.y), 0, scene.rows) });
+  const segDist = (p, w) => {
+    const t = clamp(((p.x - w.x1) * (w.x2 - w.x1) + (p.y - w.y1) * (w.y2 - w.y1)) / ((w.x2 - w.x1) ** 2 + (w.y2 - w.y1) ** 2), 0, 1);
+    return Math.hypot(p.x - (w.x1 + t * (w.x2 - w.x1)), p.y - (w.y1 + t * (w.y2 - w.y1)));
+  };
   svg.addEventListener('pointerdown', (e) => {
     const p = boardPoint(svg, e);
     const tokEl = e.target.closest('.tok');
@@ -413,6 +444,7 @@ function drawBoard() {
       sc.drag = { t, el: tokEl, dx: p.x - t.x, dy: p.y - t.y, x: t.x, y: t.y };
     } else if (sc.mode === 'measure') sc.measure = { a: p, b: p };
     else if (sc.mode === 'reveal' || sc.mode === 'hide') sc.fogStart = cellOf(p);
+    else if (sc.mode === 'wall') { const c = cornerOf(p); sc.wall = { x1: c.x, y1: c.y, x2: c.x, y2: c.y }; }
     else return;
     sc.busy = true;
     svg.setPointerCapture(e.pointerId);
@@ -431,6 +463,10 @@ function drawBoard() {
       const cells = scene.grid === 'square' ? Math.max(Math.abs(cellOf(p).x - cellOf(sc.measure.a).x), Math.abs(cellOf(p).y - cellOf(sc.measure.a).y)) : Math.hypot(dx, dy);
       document.getElementById('readout').textContent = `${+cells.toFixed(1)} squares · ${Math.round(cells * 5)} ft`;
       paintOverlay();
+    } else if (sc.wall && e.buttons) { // walls follow one grid line: lock to the longer direction
+      const c = cornerOf(p), w = sc.wall;
+      if (Math.abs(c.x - w.x1) >= Math.abs(c.y - w.y1)) Object.assign(w, { x2: c.x, y2: w.y1 }); else Object.assign(w, { x2: w.x1, y2: c.y });
+      paintOverlay();
     } else if (sc.fogStart && e.buttons) {
       const c = cellOf(p), a = sc.fogStart;
       sc.rect = { x: Math.min(a.x, c.x), y: Math.min(a.y, c.y), width: Math.abs(a.x - c.x) + 1, height: Math.abs(a.y - c.y) + 1 };
@@ -447,6 +483,12 @@ function drawBoard() {
       // On failure the next draw snaps the token back to the server's position.
       if (d.x !== d.t.x || d.y !== d.t.y) run(() => api('PATCH', `/api/tokens/${d.t.id}`, { x: d.x, y: d.y })).then(() => drawBoard());
       else drawBoard();
+    } else if (sc.wall) {
+      const w = sc.wall; sc.wall = null; paintOverlay();
+      if (w.x1 !== w.x2 || w.y1 !== w.y2) run(() => api('PATCH', `/api/scenes/${scene.id}`, { walls: [...scene.walls, w] }));
+    } else if (sc.mode === 'erase') {
+      const near = scene.walls.map((w) => [w, segDist(p, w)]).sort((a, b) => a[1] - b[1])[0];
+      if (near && near[1] < 0.35) run(() => api('PATCH', `/api/scenes/${scene.id}`, { walls: scene.walls.filter((w) => w !== near[0]) }));
     } else if (sc.fogStart) {
       const a = sc.fogStart, c = cellOf(p); sc.fogStart = null; sc.rect = null;
       run(() => api('POST', `/api/scenes/${scene.id}/fog`, { x0: a.x, y0: a.y, x1: c.x, y1: c.y, reveal: sc.mode === 'reveal' }));

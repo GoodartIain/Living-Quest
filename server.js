@@ -415,14 +415,22 @@ function createApp({ store = memoryStore(), env = process.env } = {}) {
     return { method, re: new RegExp('^' + pattern.replace(/:id/g, '([\\w-]+)') + '$'), fn };
   });
 
-  const LIVEKIT_CLIENT = path.join(__dirname, 'node_modules', 'livekit-client', 'dist', 'livekit-client.umd.js');
+  const mod = (...p) => path.join(__dirname, 'node_modules', ...p);
+  const VENDOR = {
+    '/vendor/livekit-client.umd.js': mod('livekit-client', 'dist', 'livekit-client.umd.js'),
+    '/vendor/three/three.module.js': mod('three', 'build', 'three.module.js'),
+    '/vendor/three/three.core.js': mod('three', 'build', 'three.core.js'),
+    '/vendor/three/addons/controls/OrbitControls.js': mod('three', 'examples', 'jsm', 'controls', 'OrbitControls.js'),
+    '/vendor/three/addons/controls/PointerLockControls.js': mod('three', 'examples', 'jsm', 'controls', 'PointerLockControls.js'),
+  };
   const STATIC = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8' };
   async function handle(req, res) {
     const url = new URL(req.url, 'http://x');
-    if (req.method === 'GET' && url.pathname === '/vendor/livekit-client.umd.js') { // LiveKit's browser SDK, from node_modules
-      if (!fs.existsSync(LIVEKIT_CLIENT)) return send(res, 404, { error: 'livekit-client is not installed (npm install)' });
+    if (req.method === 'GET' && VENDOR[url.pathname]) { // browser libraries served straight from node_modules (whitelist only)
+      const file = VENDOR[url.pathname];
+      if (!fs.existsSync(file)) return send(res, 404, { error: `${url.pathname} is not installed (npm install)` });
       res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'public, max-age=86400' });
-      return res.end(fs.readFileSync(LIVEKIT_CLIENT));
+      return res.end(fs.readFileSync(file));
     }
     if (req.method === 'GET' && !url.pathname.startsWith('/api/')) {
       const name = path.basename(url.pathname) || 'index.html'; // basename: no path traversal out of public/

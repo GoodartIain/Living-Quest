@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "livekit-client": "^2.23.0",
-    "pg": "8.23.1"
+    "pg": "8.23.1",
+    "three": "0.186.1"
   }
 }
