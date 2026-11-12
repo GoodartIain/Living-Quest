@@ -98,32 +98,73 @@ async function drawLive() {
       : h('p', { class: 'muted' }, 'No characters in this campaign yet.')));
 }
 
-// Livestream (Milestone 7): the broadcast link for OBS, what is on air, and an immediate stop.
+// Livestream (Milestones 7 and 12): the broadcast link for OBS, the scene playlist and takes, the stream camera, title
+// cards and overlays, audience poll, delay and highlights — all private GM controls — plus a preview of exactly what airs.
 async function drawStream(link) {
   const c = campaignOf();
   const box = document.getElementById('dir-stream');
   if (!c || !box) return;
-  const [b, scenes] = await Promise.all([api('GET', `/api/campaigns/${c.id}/broadcast`), api('GET', `/api/worlds/${state.world.id}/scenes`)]);
+  const [b, scenes, prev] = await Promise.all([api('GET', `/api/campaigns/${c.id}/broadcast`), api('GET', `/api/worlds/${state.world.id}/scenes`),
+    api('GET', `/api/campaigns/${c.id}/broadcast/preview`)]);
   const patch = (body) => run(async () => { const r = await api('PATCH', `/api/campaigns/${c.id}/broadcast`, body); await drawStream(r.key && `${location.origin}/broadcast.html#key=${r.key}`); });
+  const redraw = (fn) => run(async () => { await fn(); await drawStream(); });
+  const sceneName = (id) => (scenes.find((x) => x.id === id) || {}).name || '?';
   const onAir = scenes.find((x) => x.id === b.sceneId);
-  box.replaceChildren(h('div', {}, h('h3', {}, `Livestream · ${b.enabled ? 'ON AIR' : 'off'}`),
-    h('p', { class: 'muted' }, 'The stream shows exactly what a spectator may see of the on-air scene: public tokens, revealed areas, public rolls. Never notes, whispers or hidden tokens.'),
+  const tokens = prev.scene ? prev.scene.tokens : [];
+  const poll = b.poll;
+  const counts = poll && poll.options.map((_, i) => Object.values(poll.votes).filter((v) => v === i).length);
+  box.replaceChildren(h('div', { class: 'stream-panel' }, h('h3', {}, `Livestream · ${b.enabled ? 'ON AIR' : 'off'}${b.enabled ? ` · ${b.viewers} watching` : ''}${b.delaySeconds ? ` · ${b.delaySeconds} s delay` : ''}`),
+    h('p', { class: 'muted' }, 'The stream shows exactly what a spectator may see of the on-air scene. Everything in this panel is yours alone.'),
     link && h('div', { class: 'note' }, h('p', {}, h('strong', {}, 'Broadcast link for OBS (shown once; keep it private): ')),
       h('input', { value: link, readonly: true, style: 'width:100%', 'aria-label': 'Broadcast link', onfocus: (e) => e.target.select() }),
-      h('p', { class: 'muted' }, 'Add it as a Browser Source (1920×1080). Append &view=3d for the 3D tactical camera.')),
-    h('form', { onsubmit: onSubmit((f) => patch({ enabled: !!f.enabled, sceneId: f.sceneId || null, title: f.title, showInitiative: !!f.showInitiative, showRolls: !!f.showRolls })) },
-      h('label', { class: 'inline' }, h('input', { type: 'checkbox', name: 'enabled', checked: b.enabled || false }), 'On air'),
-      field('On-air scene', h('select', { name: 'sceneId' }, h('option', { value: '' }, '— none —'),
-        scenes.map((x) => h('option', { value: x.id, selected: x.id === b.sceneId || false }, `${x.name} (${x.visibility}${x.visibility === 'public' ? '' : ': not shown on stream'})`)))),
-      field('Title', h('input', { name: 'title', value: b.title, maxlength: 120 })),
-      h('label', { class: 'inline' }, h('input', { type: 'checkbox', name: 'showInitiative', checked: b.showInitiative || false }), 'Initiative'),
-      h('label', { class: 'inline' }, h('input', { type: 'checkbox', name: 'showRolls', checked: b.showRolls || false }), 'Public rolls'),
-      h('button', {}, 'Save')),
-    onAir && onAir.visibility !== 'public' && h('p', { class: 'note' }, `"${onAir.name}" is not public, so the stream shows "not shown on stream" until you share it publicly.`),
+      h('p', { class: 'muted' }, 'Add it as a Browser Source (1920×1080). The camera and overlays follow your choices here.')),
     h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap' },
-      b.enabled && h('button', { onclick: () => patch({ enabled: false }) }, 'Stop streaming now'),
+      h('button', { onclick: () => patch({ enabled: !b.enabled }) }, b.enabled ? 'Stop streaming now' : 'Go on air'),
       b.hasKey && h('button', { onclick: () => confirm('Make a new link? The current link stops working at once.') && patch({ rotateKey: true, enabled: true }) }, 'Make a new link'),
-      !b.hasKey && h('p', { class: 'muted' }, 'Tick "On air" and save to get the link.'))));
+      b.enabled && h('button', { onclick: () => redraw(() => api('POST', `/api/campaigns/${c.id}/highlights`, { note: prompt('Highlight note (optional)') || '' })) }, 'Mark highlight')),
+    h('h4', {}, 'Scenes in the show'),
+    h('div', { class: 'playlist', style: 'display:flex;gap:6px;flex-wrap:wrap' }, b.playlist.map((id) => h('button', { 'aria-pressed': String(id === b.sceneId),
+      onclick: () => patch({ sceneId: id, card: null }) }, `${id === b.sceneId ? '● ' : ''}Take ${sceneName(id)}`))),
+    h('details', {}, h('summary', {}, 'Choose scenes'), h('form', { onsubmit: (e) => { e.preventDefault(); patch({ playlist: [...e.target.querySelectorAll('input:checked')].map((i) => i.value) }); } },
+      scenes.map((x) => h('label', { class: 'inline' }, h('input', { type: 'checkbox', value: x.id, checked: b.playlist.includes(x.id) }), `${x.name} (${x.visibility})`)), h('button', {}, 'Save playlist'))),
+    onAir && onAir.visibility !== 'public' && h('p', { class: 'note' }, `"${onAir.name}" is not public, so the stream shows "not shown on stream".`),
+    h('h4', {}, 'Camera and cards'),
+    h('div', { style: 'display:flex;gap:6px;flex-wrap:wrap;align-items:end' },
+      field('Camera', h('select', { name: 'camera', onchange: (e) => patch({ camera: e.target.value }) }, options(['board', 'tactical', 'cinematic', 'follow'], b.camera))),
+      b.camera === 'follow' && field('Follow', h('select', { onchange: (e) => patch({ followTokenId: e.target.value || null }) }, h('option', { value: '' }, '—'),
+        tokens.map((t) => h('option', { value: t.id, selected: t.id === b.followTokenId || false }, t.name)))),
+      ['starting', 'break', 'ending'].map((k) => h('button', { 'aria-pressed': String(!!b.card && b.card.kind === k), onclick: () => patch({ card: b.card && b.card.kind === k ? null : { kind: k } }) },
+        { starting: 'Starting soon', break: 'Be right back', ending: 'Ending' }[k])),
+      b.card && h('button', { onclick: () => patch({ card: null }) }, 'Back to the scene')),
+    h('form', { onsubmit: onSubmit((f) => patch({ title: f.title, lowerThird: f.lowerThird, branding: { text: f.brandText, imageUrl: f.brandImage }, accent: f.accent,
+        showParty: f.showParty, delaySeconds: +f.delay || 0, showInitiative: !!f.showInitiative, showRolls: !!f.showRolls, reactions: !!f.reactions })) },
+      field('Title', h('input', { name: 'title', value: b.title, maxlength: 120 })),
+      field('Caption (lower third)', h('input', { name: 'lowerThird', value: b.lowerThird, maxlength: 160, size: 30 })),
+      field('Sponsor / branding text', h('input', { name: 'brandText', value: b.branding.text, maxlength: 80 })),
+      field('Branding image URL', h('input', { name: 'brandImage', value: b.branding.imageUrl, type: 'url' })),
+      field('Accent', h('input', { name: 'accent', type: 'color', value: b.accent })),
+      field('Party panel', h('select', { name: 'showParty' }, options(['off', 'names', 'health'], b.showParty))),
+      field('Delay (s)', h('input', { name: 'delay', type: 'number', min: 0, max: 120, value: b.delaySeconds, size: 3 })),
+      h('label', { class: 'inline' }, h('input', { type: 'checkbox', name: 'showInitiative', checked: b.showInitiative }), 'Initiative'),
+      h('label', { class: 'inline' }, h('input', { type: 'checkbox', name: 'showRolls', checked: b.showRolls }), 'Public rolls'),
+      h('label', { class: 'inline' }, h('input', { type: 'checkbox', name: 'reactions', checked: b.reactions }), 'Audience reactions'),
+      h('button', {}, 'Save overlays')),
+    h('p', { class: 'muted' }, 'The party panel shows only characters whose players agreed on their sheet.'),
+    h('h4', {}, 'Audience poll'),
+    poll ? h('div', {}, h('p', {}, h('strong', {}, poll.question), poll.open ? ' (open)' : ' (closed)'),
+      h('ul', {}, poll.options.map((o, i) => h('li', {}, `${o}: ${counts[i]}`))),
+      poll.open && h('button', { onclick: () => redraw(() => api('PATCH', `/api/campaigns/${c.id}/poll`, { open: false })) }, 'Close poll'), ' ',
+      h('button', { onclick: () => redraw(() => api('PATCH', `/api/campaigns/${c.id}/poll`, { clear: true })) }, 'Remove from stream'),
+      h('p', { class: 'muted' }, 'Polls never change the game by themselves; you decide what to do with the result.'))
+      : h('form', { onsubmit: onSubmit((f) => redraw(() => api('POST', `/api/campaigns/${c.id}/poll`, { question: f.q, options: f.opts.split('\n').map((x) => x.trim()).filter(Boolean) }))) },
+        field('Question', h('input', { name: 'q', required: true, maxlength: 160 })),
+        h('label', {}, 'Options (one per line)', h('textarea', { name: 'opts', rows: 3, required: true })), h('button', {}, 'Start poll')),
+    b.highlights.length > 0 && h('details', {}, h('summary', {}, `Highlights (${b.highlights.length})`),
+      h('ul', {}, b.highlights.slice().reverse().map((x) => h('li', {}, `${new Date(x.at).toLocaleTimeString()} · day ${x.day + 1}${x.note ? ` · ${x.note}` : ''}`)))),
+    h('h4', {}, 'On the stream right now'),
+    h('p', { class: 'stream-preview' }, prev.card ? `Title card: "${prev.card.text}"` : prev.scene ? `${prev.scene.scene.name} (${prev.camera} camera): ${prev.scene.tokens.map((t) => t.name).join(', ') || 'no tokens'}`
+      : prev.notPublic ? 'Not shown on stream (scene not public).' : 'Stand by.',
+      prev.lowerThird ? ` · caption "${prev.lowerThird}"` : '', prev.party.length ? ` · party: ${prev.party.map((x) => x.name).join(', ')}` : '')));
 }
 
 // Players: a banner pointing to the GM's live scene, kept current by the campaign stream.

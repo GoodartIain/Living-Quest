@@ -9,7 +9,9 @@ const WALL_H = 2;
 const RADIUS = 0.25;     // how close the first-person camera may get to a wall
 const SPEED = 3;         // cells per second
 
-export function mount(host, view, { onMove, mode = 'tactical', userId } = {}) {
+// Milestone 12 options: mode 'cinematic' (slow automatic orbit) and `follow` (tactical camera that keeps one token in view),
+// both for the livestream; `onFloorClick(x, z)` and `onTriggerClick(id)` for the GM's 3D editing and for using triggers.
+export function mount(host, view, { onMove, mode = 'tactical', userId, follow = null, onFloorClick = null, onTriggerClick = null } = {}) {
   const width = host.clientWidth || 800;
   const height = Math.round(width * 0.65);
   let renderer;
@@ -34,7 +36,10 @@ export function mount(host, view, { onMove, mode = 'tactical', userId } = {}) {
   scene.add(world);
 
   let state = view;
-  let current = null; // 'tactical' | 'first'
+  let current = null; // 'tactical' | 'first' | 'cinematic'
+  let followId = follow;
+  let floorMesh = null;
+  const triggerMeshes = [];
   let orbit = null;
   let look = null;
   let walls = [];
@@ -67,6 +72,7 @@ export function mount(host, view, { onMove, mode = 'tactical', userId } = {}) {
     floor.rotation.x = -Math.PI / 2;
     floor.position.set(s.cols / 2, 0, s.rows / 2);
     world.add(floor);
+    floorMesh = floor;
     if (s.grid === 'square') {
       const pts = [];
       for (let x = 0; x <= s.cols; x++) pts.push(x, 0.002, 0, x, 0.002, s.rows);
@@ -94,6 +100,15 @@ export function mount(host, view, { onMove, mode = 'tactical', userId } = {}) {
       box.position.set((w.x1 + w.x2) / 2, WALL_H / 2, (w.y1 + w.y2) / 2);
       box.userData.wall = true;
       world.add(box);
+    }
+    // Interaction triggers: a gold diamond floating over their square.
+    triggerMeshes.length = 0;
+    for (const tr of state.triggers || []) {
+      const gem = new THREE.Mesh(new THREE.OctahedronGeometry(0.22), new THREE.MeshStandardMaterial({ color: '#e0b02a', emissive: '#5a4200' }));
+      gem.position.set(tr.x + 0.5, 0.6, tr.y + 0.5);
+      gem.userData.trigger = tr.id;
+      triggerMeshes.push(gem);
+      world.add(gem);
     }
     const mine = me();
     for (const t of tokens) {
@@ -124,13 +139,15 @@ export function mount(host, view, { onMove, mode = 'tactical', userId } = {}) {
     if (look) { look.unlock(); look.dispose(); look = null; }
     current = next;
     const s = state.scene;
-    if (next === 'tactical') {
+    if (next === 'tactical' || next === 'cinematic') {
       camera.position.set(s.cols / 2, Math.max(s.cols, s.rows) * 0.9, s.rows / 2 + Math.max(s.cols, s.rows) * 0.35);
       orbit = new OrbitControls(camera, renderer.domElement);
       orbit.target.set(s.cols / 2, 0, s.rows / 2);
       orbit.maxPolarAngle = Math.PI * 0.45; // never under the floor
       orbit.minDistance = 2;
       orbit.maxDistance = Math.max(s.cols, s.rows) * 2;
+      orbit.autoRotate = next === 'cinematic';
+      orbit.autoRotateSpeed = 0.5;
       orbit.update();
     } else {
       const t = me();
@@ -194,6 +211,22 @@ export function mount(host, view, { onMove, mode = 'tactical', userId } = {}) {
     }
   };
   const keydown = onKey(true), keyup = onKey(false);
+  let down = null;
+  const ray = new THREE.Raycaster();
+  const pointerDown = (e) => { down = { x: e.clientX, y: e.clientY }; };
+  const pointerUp = (e) => {
+    if (!down || current === 'first' || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5) return;
+    const r = renderer.domElement.getBoundingClientRect();
+    world.updateMatrixWorld(true); // a rebuild may not have been rendered yet
+    camera.updateMatrixWorld();
+    ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), camera);
+    const gem = ray.intersectObjects(triggerMeshes)[0];
+    if (gem && onTriggerClick) return onTriggerClick(gem.object.userData.trigger);
+    const hit = floorMesh && ray.intersectObject(floorMesh)[0];
+    if (hit && onFloorClick) onFloorClick(hit.point.x, hit.point.z);
+  };
+  renderer.domElement.addEventListener('pointerdown', pointerDown);
+  renderer.domElement.addEventListener('click', pointerUp); // a click, not the end of an orbit drag (checked against pointerdown)
   document.addEventListener('keydown', keydown);
   document.addEventListener('keyup', keyup);
 
@@ -203,6 +236,15 @@ export function mount(host, view, { onMove, mode = 'tactical', userId } = {}) {
     const dt = Math.min(0.1, (now - last) / 1000);
     last = now;
     if (current === 'first') { stepFirstPerson(dt); syncToken(now); }
+    if (orbit && followId) {
+      const t = state.tokens.find((x) => x.id === followId);
+      if (t) { // ease the camera's target toward the followed token, keeping the viewing angle
+        const goal = new THREE.Vector3(t.x + t.size / 2, 0, t.y + t.size / 2);
+        const step = goal.sub(orbit.target).multiplyScalar(Math.min(1, dt * 3));
+        orbit.target.add(step);
+        camera.position.add(step);
+      }
+    }
     if (orbit) orbit.update();
     renderer.render(scene, camera);
     raf = requestAnimationFrame(loop);
@@ -213,6 +255,7 @@ export function mount(host, view, { onMove, mode = 'tactical', userId } = {}) {
   return {
     update(next) { state = next; build(); },
     setMode,
+    setFollow(id) { followId = id; },
     get mode() { return current; },
     camera,
     world,
@@ -221,6 +264,8 @@ export function mount(host, view, { onMove, mode = 'tactical', userId } = {}) {
       document.removeEventListener('keydown', keydown);
       document.removeEventListener('keyup', keyup);
       renderer.domElement.removeEventListener('click', lockOnClick);
+      renderer.domElement.removeEventListener('pointerdown', pointerDown);
+      renderer.domElement.removeEventListener('click', pointerUp);
       if (orbit) orbit.dispose();
       if (look) { look.unlock(); look.dispose(); }
       renderer.dispose();

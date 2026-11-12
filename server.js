@@ -400,7 +400,7 @@ function createApp({ store = memoryStore(), env = process.env } = {}) {
   };
   const talk = chat({ db, find, fail, need, record, id, check,
     characterOwner: (u, c) => c.ownerId === u.id || find('worlds', c.worldId).ownerId === u.id });
-  const cast = broadcast({ db, find, fail, need, record, check, hash, sceneView: table2d.sceneView });
+  const cast = broadcast({ db, find, fail, need, record, id, check, hash, sceneView: table2d.sceneView, tokenInfo: chars.tokenInfo });
   hooks.onScene = cast.onScene;
   Object.assign(routes, cast.routes);
   const calls = voice({ db, find, fail, need, record, check, env });

@@ -79,6 +79,7 @@
 <script src="quests.js"></script>
 <script src="triggers.js"></script>
 <script src="world.js"></script>
+<script src="audience.js"></script>
 <script src="vendor/livekit-client.umd.js"></script>
 <script src="voice.js"></script>
 <script>
@@ -382,7 +383,7 @@ function renderScene() {
       } }, label)))));
   $app.append(h('div', { class: 'row' },
     h('section', {}, h('div', { id: 'board' })),
-    h('section', {}, h('div', { id: 'enc' }), diceBox(v), gm && sceneGmTools(v), gm && triggerTools(v))));
+    h('section', {}, h('div', { id: 'enc' }), diceBox(v), gm && sceneGmTools(v), gm && triggerTools(v), !gm && audienceBox())));
   drawBoard(); drawEncounter();
 }
 
@@ -402,7 +403,27 @@ async function draw3d(host) {
   const { mount } = await import('./scene3d.js');
   if (state.scene !== sc || sc.threeHost !== host || (sc.display || '2d') === '2d') return; // the user moved on while it loaded
   sc.three = mount(host, sc.view, { mode: sc.display, userId: state.me && state.me.id,
-    onMove: (id, x, y) => api('PATCH', `/api/tokens/${id}`, { x, y }).catch((e) => { document.getElementById('err').textContent = e.message; }) });
+    onMove: (id, x, y) => api('PATCH', `/api/tokens/${id}`, { x, y }).catch((e) => { document.getElementById('err').textContent = e.message; }),
+    onTriggerClick: (tid) => sc.mode === 'move' && useTrigger((sc.view.triggers || []).find((t) => t.id === tid)),
+    onFloorClick: (x, z) => edit3d(sc, x, z) });
+}
+
+// 3D editing (Milestone 12): the same tools as the 2D board, by clicking the floor in the tactical view.
+function edit3d(sc, x, z) {
+  const scene = sc.view.scene;
+  const cx = Math.min(scene.cols - 1, Math.max(0, Math.floor(x))), cz = Math.min(scene.rows - 1, Math.max(0, Math.floor(z)));
+  if (sc.mode === 'trigger') return placeTrigger(scene, { x: cx, y: cz });
+  if (sc.mode === 'wall') { // the grid edge nearest the click, one square long
+    const w = Math.abs(z - Math.round(z)) < Math.abs(x - Math.round(x))
+      ? { x1: cx, y1: Math.round(z), x2: cx + 1, y2: Math.round(z) } : { x1: Math.round(x), y1: cz, x2: Math.round(x), y2: cz + 1 };
+    return run(() => api('PATCH', `/api/scenes/${scene.id}`, { walls: [...scene.walls, w] }));
+  }
+  if (sc.mode === 'erase') {
+    const d = (w) => { const t = Math.max(0, Math.min(1, ((x - w.x1) * (w.x2 - w.x1) + (z - w.y1) * (w.y2 - w.y1)) / ((w.x2 - w.x1) ** 2 + (w.y2 - w.y1) ** 2)));
+      return Math.hypot(x - (w.x1 + t * (w.x2 - w.x1)), z - (w.y1 + t * (w.y2 - w.y1))); };
+    const near = scene.walls.map((w) => [w, d(w)]).sort((a, b) => a[1] - b[1])[0];
+    if (near && near[1] < 0.4) run(() => api('PATCH', `/api/scenes/${scene.id}`, { walls: scene.walls.filter((w) => w !== near[0]) }));
+  }
 }
 
 function drawBoard() {

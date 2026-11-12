@@ -23,7 +23,7 @@ const SPEC = {
   tokens: ['id', 'worldId', 'sceneId', 'name', 'x', 'y', 'size', 'color', 'visibility', 'controlledBy', 'pageId', 'characterId', 'npcId'],
   characters: ['id', 'worldId', 'campaignId', 'ownerId', 'ruleset', 'name', 'portraitUrl', 'personality', 'backstory', 'species', 'className',
     'background', 'abilityMethod', 'baseScores', 'backgroundBonus', 'abilities', 'skills', 'feats', 'tools', 'hp', 'conditions', 'inventory', 'currency',
-    'weapons', 'spells', 'slotsUsed', 'size', 'armor', 'shield', 'masteries', 'raging', 'deathSaves', 'hitDiceUsed', 'journal', 'choices', 'subclass', 'multiclass'],
+    'weapons', 'spells', 'slotsUsed', 'size', 'armor', 'shield', 'masteries', 'raging', 'deathSaves', 'hitDiceUsed', 'journal', 'choices', 'subclass', 'multiclass', 'onStream'],
   homebrew: ['id', 'worldId', 'kind', 'name', 'data'],
   messages: ['id', 'worldId', 'campaignId', 'channel', 'fromUserId', 'fromName', 'asCharacter', 'toUserIds', 'toNames', 'text', 'at'],
   chatDeletions: ['id', 'messageId', 'by', 'at'],
@@ -62,7 +62,7 @@ function upgrade(db) {
     c.broadcast ??= { enabled: false, keyHash: null, sceneId: null, title: '', showInitiative: true, showRolls: true }; c.clock ??= { day: 0 }; c.clock.minute ??= 480; }
   for (const c of db.characters) {
     c.weapons ??= []; c.spells ??= []; c.slotsUsed ??= {}; c.armor ??= null; c.shield ??= false; c.masteries ??= []; c.raging ??= false;
-    c.deathSaves ??= { successes: 0, failures: 0 }; c.hitDiceUsed ??= 0; c.journal ??= []; c.choices ??= []; c.subclass ??= null; c.multiclass ??= {};
+    c.deathSaves ??= { successes: 0, failures: 0 }; c.hitDiceUsed ??= 0; c.journal ??= []; c.choices ??= []; c.subclass ??= null; c.multiclass ??= {}; c.onStream ??= false;
     c.size ??= ['Gnome', 'Halfling'].includes(c.species) ? 'Small' : 'Medium';
   }
   return db;

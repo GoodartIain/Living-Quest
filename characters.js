@@ -278,7 +278,7 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
         personality: optional(b.personality, 'personality', 4000), backstory: optional(b.backstory, 'backstory', 20000),
         ...built, hp: { current: 0, temp: 0 }, conditions: [], inventory: [], currency: { cp: 0, sp: 0, ep: 0, gp: 0, pp: 0 },
         weapons: [], spells: [], slotsUsed: {}, armor: null, shield: false, masteries: [], raging: false,
-        deathSaves: { successes: 0, failures: 0 }, hitDiceUsed: 0, journal: [], choices: [], subclass: null, multiclass: {} };
+        deathSaves: { successes: 0, failures: 0 }, hitDiceUsed: 0, journal: [], choices: [], subclass: null, multiclass: {}, onStream: false };
       if (b.classEquipment !== undefined || b.backgroundEquipment !== undefined) { // the A/B/C packages from the SRD
         const eq = rules.startingEquipment(c, b.classEquipment ?? null, b.backgroundEquipment ?? null);
         Object.assign(c, { inventory: validInventory(eq.inventory), weapons: validWeapons(eq.weapons), armor: eq.armor, shield: eq.shield });
@@ -307,6 +307,12 @@ module.exports = function characters({ db, find, fail, need, record, id, check, 
       owner(u, c);
       const ch = {};
       if (b.name !== undefined) ch.name = str(b.name, 'name', 80);
+      // Consent to appear on the livestream's party panel is the player's alone, never the GM's.
+      if (b.onStream !== undefined) {
+        if (c.ownerId !== u.id) fail(403, 'only the player can agree to show this character on stream');
+        if (typeof b.onStream !== 'boolean') fail(400, 'onStream must be true or false');
+        ch.onStream = b.onStream;
+      }
       if (b.portraitUrl !== undefined) ch.portraitUrl = b.portraitUrl ? safeUrl(b.portraitUrl) : '';
       if (b.personality !== undefined) ch.personality = optional(b.personality, 'personality', 4000);
       if (b.backstory !== undefined) ch.backstory = optional(b.backstory, 'backstory', 20000);

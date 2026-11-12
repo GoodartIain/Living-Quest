@@ -25,12 +25,16 @@ const api = async (method, url, body, token) => (await fetch(B + url, { method, 
   const g = await mk(gm.token);
   await g.goto(B); await g.click('li >> button:text-is("Aster")'); await g.click('button:text-is("director")');
   await g.waitForSelector('text=Livestream · off');
-  await g.check('#dir-stream input[name=enabled]'); await g.selectOption('#dir-stream select[name=sceneId]', market.id); await g.fill('#dir-stream input[name=title]', 'Session 12');
-  await g.click('#dir-stream button:text-is("Save")'); await g.waitForSelector('text=Livestream · ON AIR');
-  const link = await g.inputValue('input[aria-label="Broadcast link"]');
+  // Milestone 12 panel: go on air, put the market in the show, take it, set the title.
+  await g.click('#dir-stream button:text-is("Go on air")'); await g.waitForSelector('text=Livestream · ON AIR');
+  const link = await g.inputValue('input[aria-label="Broadcast link"]'); // shown once
+  await g.click('summary:text-is("Choose scenes")'); await g.check('#dir-stream label:has-text("Market") input'); await g.click('button:text-is("Save playlist")');
+  await g.click('button:text-is("Take Market")'); await g.waitForSelector('.stream-preview:has-text("Market")'); // the panel redraws: type after it
+  await g.fill('#dir-stream input[name=title]', 'Session 12'); await g.click('#dir-stream button:text-is("Save overlays")');
+  await g.waitForSelector('#dir-stream input[name=title][value="Session 12"]');
   // OBS-like page: no login.
   const obs = await (await b.newContext({ viewport: { width: 1920, height: 1080 } })).newPage(); obs.on('pageerror', (e) => errs.push(e.message));
-  await obs.goto(link); await obs.waitForSelector('svg .tok');
+  await obs.goto(link); await obs.waitForSelector('svg .tok'); await obs.waitForSelector('#title:has-text("Session 12")');
   const obsText = await obs.textContent('body');
   const offVisibleOnAir = await obs.isVisible('#off');
   const tokNames = await obs.$$eval('svg .tok text', (t) => t.map((x) => x.textContent));
@@ -40,11 +44,12 @@ const api = async (method, url, body, token) => (await fetch(B + url, { method, 
 
   // Stop: off air at once; back on: the page reconnects by itself.
   await g.click('button:text-is("Stop streaming now")'); await obs.waitForSelector('#off', { state: 'visible', timeout: 5000 }); const offVisibleAfterStop = true;
-  await g.waitForSelector('text=Livestream · off'); await g.check('#dir-stream input[name=enabled]'); await g.click('#dir-stream button:text-is("Save")');
+  await g.waitForSelector('text=Livestream · off'); await g.click('#dir-stream button:text-is("Go on air")');
   await obs.waitForSelector('#off', { state: 'hidden', timeout: 15000 }); const backOnAir = true;
-  // 3D tactical camera variant
-  const obs3d = await (await b.newContext({ viewport: { width: 1920, height: 1080 } })).newPage(); obs3d.on('pageerror', (e) => errs.push(e.message));
-  await obs3d.goto(link + '&view=3d'); await obs3d.waitForSelector('#stage canvas', { timeout: 15000 }); await obs3d.waitForTimeout(800);
+  // 3D tactical camera, chosen by the GM (Milestone 12 replaced the &view=3d link option).
+  await g.selectOption('#dir-stream select[name=camera]', 'tactical');
+  await obs.waitForSelector('#stage canvas', { timeout: 15000 }); await obs.waitForTimeout(800);
+  await g.selectOption('#dir-stream select[name=camera]', 'board'); await obs.waitForSelector('#stage svg');
   // Signed-in spectator: same picture in the app.
   const v = await mk(viv.token); await v.goto(B); await v.click('li >> button:text-is("Aster")'); await v.waitForSelector('text=Characters'); await v.evaluate((id) => openScene(id), market.id); await v.waitForSelector('svg.board .tok');
   const vivNames = await v.$$eval('svg.board .tok title', (t) => t.map((x) => x.textContent));

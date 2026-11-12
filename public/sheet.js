@@ -414,7 +414,11 @@ function renderSheet() {
     h('div', { style: 'display:flex;gap:16px;align-items:center;flex-wrap:wrap' },
       c.portraitUrl && h('img', { src: c.portraitUrl, alt: `Portrait of ${c.name}`, style: 'width:96px;height:96px;object-fit:cover;border-radius:8px' }),
       h('div', {}, h('h2', {}, c.name), h('p', { class: 'muted', style: 'margin:0' }, `Level ${v.level} ${c.species} ${Object.entries(s.classes).filter(([, n]) => n > 0).map(([k, n]) => (Object.keys(s.classes).length > 1 ? `${k} ${n}` : k)).join(' / ')}${c.subclass ? ` (${c.subclass})` : ''} · ${c.background} · ${s.size}`))),
-    progress, rollControls()));
+    progress, rollControls(),
+    // Milestone 12: consent to appear on the livestream's party panel is the player's alone.
+    c.ownerId === state.me.id && h('label', { class: 'inline' }, h('input', { type: 'checkbox', name: 'onStream', checked: !!c.onStream,
+      onchange: (e) => run(async () => { await api('PATCH', `/api/characters/${c.id}`, { onStream: e.target.checked }); await reloadCharacter(await api('GET', `/api/characters/${c.id}`)); }) }),
+      'Show this character (name, portrait, class, and HP if the GM allows) on the campaign livestream')));
 
   $app.append(multiclassPanel(v));
   if (v.pendingChoices.length) $app.append(choicesPanel(v));

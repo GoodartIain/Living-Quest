@@ -5,32 +5,51 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Living Quest broadcast</title>
 <script type="importmap">{ "imports": { "three": "./vendor/three/three.module.js", "three/addons/": "./vendor/three/addons/" } }</script>
-<!-- OBS browser source: paste the broadcast link the GM copied from Director Mode (add &view=3d for the 3D tactical camera). -->
+<!-- OBS browser source (1920×1080): paste the broadcast link the GM copied from Director Mode. Everything shown here
+     (scene, camera, overlays) is decided by the GM and projected by the server for a spectator of the campaign. -->
 <style>
   :root { --fg:#f3ece0; --muted:#b9ae9c; --accent:#e0a66a; --panel:#1b1814ee; }
   * { box-sizing:border-box; }
   html, body { margin:0; height:100%; background:#100e0b; color:var(--fg); font:18px/1.4 system-ui, sans-serif; overflow:hidden; }
   body { display:grid; grid-template-rows:auto 1fr; }
-  header { padding:10px 18px; display:flex; gap:14px; align-items:baseline; background:var(--panel); }
+  header { padding:10px 18px; display:flex; gap:14px; align-items:baseline; background:var(--panel); border-bottom:3px solid var(--accent); }
   header h1 { margin:0; font-size:22px; } header span { color:var(--muted); }
   main { display:grid; grid-template-columns:1fr 300px; gap:12px; padding:12px; min-height:0; }
-  #stage { min-height:0; display:grid; place-items:center; }
+  #stage { min-height:0; display:grid; place-items:center; position:relative; }
   #stage svg { width:100%; height:calc(100vh - 100px); } #stage canvas { max-width:100%; max-height:calc(100vh - 90px); border-radius:8px; }
-  aside { background:var(--panel); border-radius:8px; padding:12px; overflow:hidden; }
+  aside { background:var(--panel); border-radius:8px; padding:12px; overflow:hidden; display:flex; flex-direction:column; gap:4px; }
   aside h2 { font-size:15px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin:6px 0; }
   ol, ul { margin:0; padding-left:22px; } .turn { color:var(--accent); font-weight:700; }
-  .off { position:fixed; inset:0; display:grid; place-items:center; font-size:42px; color:var(--muted); background:#100e0b; } .off[hidden] { display:none; }
+  .cover { position:fixed; inset:0; display:grid; place-items:center; font-size:48px; color:var(--muted); background:#100e0b; text-align:center; padding:40px; }
+  .cover[hidden], [hidden] { display:none !important; }
+  #card { color:var(--fg); background:radial-gradient(circle, #2a231b, #100e0b); border-top:6px solid var(--accent); }
+  #lower { position:fixed; left:24px; bottom:24px; max-width:60%; background:var(--panel); border-left:6px solid var(--accent); padding:10px 18px; font-size:24px; }
+  #brand { position:fixed; right:24px; bottom:24px; background:var(--panel); padding:8px 14px; border-radius:6px; display:flex; gap:10px; align-items:center; color:var(--muted); }
+  #brand img { max-height:48px; }
+  .party li { list-style:none; display:flex; gap:8px; align-items:center; margin:4px 0; } .party { padding:0; }
+  .party img { width:40px; height:40px; border-radius:50%; object-fit:cover; background:#333; }
+  .bar { height:8px; background:#0008; border-radius:4px; overflow:hidden; width:140px; } .bar i { display:block; height:100%; background:#3c9a4a; }
+  .poll .opt { margin:4px 0; } .poll .opt div { height:10px; background:var(--accent); border-radius:4px; }
+  #reactions { position:fixed; right:40px; bottom:90px; width:80px; height:60vh; pointer-events:none; }
+  #reactions span { position:absolute; bottom:0; font-size:40px; animation:rise 3s ease-out forwards; }
+  @keyframes rise { from { transform:translateY(0); opacity:1; } to { transform:translateY(-55vh); opacity:0; } }
   .tok text { font-size:0.34px; fill:#fff; paint-order:stroke; stroke:#000; stroke-width:0.07px; }
 </style>
 </head>
 <body>
 <header><h1 id="title">Living Quest</h1><span id="sub"></span></header>
-<main><div id="stage" aria-live="polite"></div><aside><h2>Initiative</h2><ol id="init"></ol><h2>Rolls</h2><ul id="rolls"></ul></aside></main>
-<div class="off" id="off">Off air</div>
+<main><div id="stage" aria-live="polite"></div>
+  <aside><section id="partybox" hidden><h2>Party</h2><ul class="party" id="party"></ul></section>
+    <section id="initbox"><h2>Initiative</h2><ol id="init"></ol></section>
+    <section id="pollbox" class="poll" hidden><h2 id="pollq"></h2><div id="poll"></div></section>
+    <section><h2>Rolls</h2><ul id="rolls"></ul></section></aside></main>
+<div id="lower" hidden></div>
+<div id="brand" hidden></div>
+<div id="reactions"></div>
+<div class="cover" id="card" hidden></div>
+<div class="cover" id="off">Off air</div>
 <script>
-const params = new URLSearchParams(location.hash.slice(1));
-const key = params.get('key');
-const want3d = params.get('view') === '3d';
+const key = new URLSearchParams(location.hash.slice(1)).get('key');
 const $ = (id) => document.getElementById(id);
 const el = (tag, attrs = {}, ...kids) => { // SVG/HTML builder that only ever creates text nodes for content
   const e = document.createElementNS(attrs.svg ? 'http://www.w3.org/2000/svg' : 'http://www.w3.org/1999/xhtml', tag);
@@ -38,7 +57,7 @@ const el = (tag, attrs = {}, ...kids) => { // SVG/HTML builder that only ever cr
   for (const k of kids.flat()) if (k != null && k !== false) e.append(k.nodeType ? k : String(k));
   return e;
 };
-let three = null, threeLoading = false;
+let three = null, threeLoading = false, shownScene = null;
 
 function board(v) {
   const { scene, tokens, encounter } = v;
@@ -67,29 +86,57 @@ function board(v) {
   return svg;
 }
 
-async function show(s) {
-  $('off').hidden = !!s.onAir;
-  $('title').textContent = s.title || s.campaign;
-  $('sub').textContent = [s.title ? s.campaign : '', s.scene ? s.scene.scene.name : ''].filter(Boolean).join(' · ');
+async function stage(s) {
   const v = s.scene;
-  if (!v) {
+  if (!v || s.camera === 'board') {
     if (three) { three.dispose(); three = null; }
-    $('stage').replaceChildren(el('p', {}, s.notPublic ? 'This scene is not shown on stream.' : 'Stand by…'));
-    $('init').replaceChildren(); $('rolls').replaceChildren();
+    $('stage').replaceChildren(v ? board(v) : el('p', {}, s.notPublic ? 'This scene is not shown on stream.' : 'Stand by…'));
     return;
   }
-  if (want3d) {
-    if (three) three.update(v);
-    else if (!threeLoading) {
-      threeLoading = true;
-      const { mount } = await import('./scene3d.js');
-      three = mount($('stage'), v, { mode: 'tactical' });
-      threeLoading = false;
-    }
-  } else $('stage').replaceChildren(board(v));
+  const mode = s.camera === 'cinematic' ? 'cinematic' : 'tactical';
+  if (three && shownScene !== v.scene.id) { three.dispose(); three = null; } // a new scene: frame it afresh
+  if (three) { three.update(v); if (three.mode !== mode) three.setMode(mode); three.setFollow(s.followTokenId); return; }
+  if (threeLoading) return;
+  threeLoading = true;
+  const { mount } = await import('./scene3d.js');
+  three = mount($('stage'), v, { mode, follow: s.followTokenId });
+  shownScene = v.scene.id;
+  threeLoading = false;
+}
+
+function show(s) {
+  $('off').hidden = !!s.onAir;
+  document.documentElement.style.setProperty('--accent', s.accent || '#e0a66a');
+  $('title').textContent = s.title || s.campaign;
+  $('sub').textContent = [s.title ? s.campaign : '', s.scene ? s.scene.scene.name : ''].filter(Boolean).join(' · ');
+  $('card').hidden = !s.card;
+  $('card').textContent = s.card ? s.card.text : '';
+  $('lower').hidden = !s.lowerThird; $('lower').textContent = s.lowerThird || '';
+  const b = s.branding || {};
+  $('brand').hidden = !(b.text || b.imageUrl);
+  $('brand').replaceChildren(...[b.imageUrl && el('img', { src: b.imageUrl, alt: '' }), b.text].filter(Boolean));
+  $('partybox').hidden = !(s.party && s.party.length);
+  $('party').replaceChildren(...(s.party || []).map((p) => el('li', {}, p.portraitUrl ? el('img', { src: p.portraitUrl, alt: '' }) : el('img', { alt: '' }),
+    el('div', {}, el('div', {}, `${p.name} · ${p.className} ${p.level}`),
+      p.hp && el('div', { class: 'bar', title: `${p.hp.current}/${p.hp.max}` }, el('i', { style: `width:${Math.max(0, Math.min(100, (100 * p.hp.current) / p.hp.max))}%` }))))));
+  $('pollbox').hidden = !s.poll;
+  if (s.poll) {
+    $('pollq').textContent = `${s.poll.question}${s.poll.open ? '' : ' (closed)'}`;
+    $('poll').replaceChildren(...s.poll.options.map((o) => el('div', { class: 'opt' }, `${o.text}: ${o.votes}`,
+      el('div', { style: `width:${s.poll.total ? (100 * o.votes) / s.poll.total : 0}%` }))));
+  }
+  const v = s.scene;
+  stage(s);
+  if (!v) { $('init').replaceChildren(); $('rolls').replaceChildren(); return; }
   const name = (id) => (v.tokens.find((t) => t.id === id) || {}).name || '?';
   $('init').replaceChildren(...(v.encounter ? v.encounter.combatants.map((c) => el('li', { class: c.tokenId === v.encounter.turnTokenId ? 'turn' : null }, `${name(c.tokenId)} (${c.initiative})`)) : [el('li', {}, '—')]));
   $('rolls').replaceChildren(...v.rolls.map((r) => el('li', {}, `${r.userName}: ${r.label || r.formula} = ${r.total}`)));
+}
+
+function react(emoji) {
+  const e = el('span', { style: `left:${Math.random() * 40}px` }, emoji);
+  $('reactions').append(e);
+  setTimeout(() => e.remove(), 3000);
 }
 
 // Reconnects every 5 s while the broadcast is off, so OBS picks it up again when the GM goes back on air.
@@ -97,6 +144,7 @@ function connect() {
   if (!key) { $('off').textContent = 'Missing broadcast key: paste the full link from Director Mode.'; return; }
   const es = new EventSource(`/api/broadcast/stream?key=${encodeURIComponent(key)}`);
   es.addEventListener('state', (e) => show(JSON.parse(e.data)));
+  es.addEventListener('reaction', (e) => react(JSON.parse(e.data).emoji));
   const retry = () => { es.close(); $('off').hidden = false; setTimeout(connect, 5000); };
   es.addEventListener('off', retry);
   es.onerror = () => { if (es.readyState === EventSource.CLOSED) retry(); };
